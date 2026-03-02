@@ -34,6 +34,8 @@ C_BRED    = "\033[1;31m"   # bold red
 C_BGREEN  = "\033[1;32m"   # bold green
 C_BYELLOW = "\033[1;33m"   # bold yellow
 C_BWHITE  = "\033[1;37m"   # bold white
+C_REVERSE = "\033[7m"      # inverse video
+C_REV_RED = "\033[7;31m"   # inverse video red
 
 
 def colorize(text, rarity):
@@ -94,14 +96,14 @@ def plain_len(s):
 
 
 def show_card(c):
-    text = f"{c.rank}{SUIT_SYM[c.suit]}"
+    text = f" {c.rank}{SUIT_SYM[c.suit]} "
     if c.suit in ("H", "D"):
-        return f"{C_RED}{text}{C_RESET}"
-    return text
+        return f"{C_REV_RED}{text}{C_RESET}"
+    return f"{C_REVERSE}{text}{C_RESET}"
 
 
 def show_hand(cards):
-    return "  ".join(show_card(c) for c in cards)
+    return " ".join(show_card(c) for c in cards)
 
 
 def hp_color(current, maximum):
@@ -118,7 +120,7 @@ def hp_bar(current, maximum, width=20):
     pct = max(0, current / maximum)
     filled = int(width * pct)
     color = hp_color(current, maximum)
-    return f"[{color}{'#' * filled}{C_RESET}{C_DIM}{'.' * (width - filled)}{C_RESET}]"
+    return f"{color}{'█' * filled}{C_RESET}{C_DIM}{'░' * (width - filled)}{C_RESET}"
 
 
 def read_key():
@@ -378,16 +380,12 @@ class Game:
 
     def show_status(self):
         bar = hp_bar(self.player.hp, self.player.max_hp)
-        parts = [f"HP {bar} {self.player.hp}/{self.player.max_hp}"]
-        parts.append(f"Folds: {self.player.folds}")
+        print(f"  You  {bar} {self.player.hp}/{self.player.max_hp}     Folds: {self.player.folds}")
         if self.player.companions:
-            comp_strs = []
             for c in self.player.companions:
                 hint_c = colorize_hint(c.activation)
                 suffix = f" [{hint_c}]" if hint_c else ""
-                comp_strs.append(f"{C_CYAN}{c.name}{C_RESET} Lv{c.level}{suffix}")
-            parts.append(", ".join(comp_strs))
-        print(f"  {' | '.join(parts)}")
+                print(f"  {C_CYAN}{c.name}{C_RESET} Lv{c.level}{suffix}")
 
     # --- Damage application ---
 
@@ -565,19 +563,20 @@ class Game:
         enemy_cards = [self.deck.draw(), self.deck.draw()]
         has_peek = self.player.get_companion_effect("peek_enemy", player_cards) is not None
 
-        print(f"\n  {C_BWHITE}-- Hand {hand_num} --{C_RESET}")
+        hand_label = f"── Hand {hand_num} "
+        print(f"\n  {C_DIM}{hand_label}{'─' * (45 - len(hand_label))}{C_RESET}")
 
         # --- Naturals ---
         p_nat = is_natural_21(player_cards)
         e_nat = is_natural_21(enemy_cards)
 
         if p_nat or e_nat:
-            print(f"  You:   {show_card(player_cards[0])}", end="")
+            print(f"  You    {show_card(player_cards[0])}", end="")
             sys.stdout.flush()
             beat(0.15)
-            print(f"  {show_card(player_cards[1])}  = {hand_value(player_cards)}")
+            print(f" {show_card(player_cards[1])}   = {hand_value(player_cards)}")
             beat(0.1)
-            print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}")
+            print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}")
             beat(0.5)
             if p_nat and e_nat:
                 print(f"  {C_YELLOW}Both natural 21! Push.{C_RESET}")
@@ -601,15 +600,16 @@ class Game:
             return
 
         # --- Show starting hands (progressive deal) ---
-        print(f"  You:   {show_card(player_cards[0])}", end="")
+        print(f"  You    {show_card(player_cards[0])}", end="")
         sys.stdout.flush()
         beat(0.15)
-        print(f"  {show_card(player_cards[1])}  = {hand_value(player_cards)}")
+        print(f" {show_card(player_cards[1])}   = {hand_value(player_cards)}")
         beat(0.1)
+        threshold_str = f"stands at {enemy.hit_threshold}"
         if has_peek:
-            print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+            print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
         else:
-            print(f"  Enemy: {show_card(enemy_cards[0])}  ??")
+            print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
 
         # --- Fold option (first decision only) ---
         first_decision = True
@@ -624,7 +624,7 @@ class Game:
                 if unbust and random.random() < unbust:
                     removed = player_cards.pop()
                     print(f"  {C_CYAN}Goblin Shaman saves you!{C_RESET} Tossed {show_card(removed)}")
-                    print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
+                    print(f"  You    {show_hand(player_cards)}   = {hand_value(player_cards)}")
                     continue
                 player_busted = True
                 beat(0.4)
@@ -657,25 +657,26 @@ class Game:
 
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES"}
 
-            threshold_str = f"plays to {enemy.hit_threshold}"
             can_fold = first_decision and self.player.folds > 0
+            stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
 
+            print(f"\n  \u2192 Hit   \u2190 Stand                    {stats_str}")
             if can_fold:
                 fold_str = f"\u2193 Fold ({self.player.folds})"
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  {fold_str}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    f"{fold_str}  \u2191 Info  r Rules",
                     ["right", "left", "down", "up", "r"],
                     arrow_labels,
                 )
             elif first_decision:
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  {C_DIM}\u2193 Fold (0){C_RESET}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    f"{C_DIM}\u2193 Fold (0){C_RESET}  \u2191 Info  r Rules",
                     ["right", "left", "up", "r"],
                     arrow_labels,
                 )
             else:
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    f"\u2191 Info  r Rules",
                     ["right", "left", "up", "r"],
                     arrow_labels,
                 )
@@ -748,6 +749,7 @@ class Game:
             print(f"  {C_BGREEN}ENEMY BUSTS!{C_RESET} ({e_val})")
 
         # --- Resolve ---
+        print()
         beat(0.3)
         won = False
         lost = False
@@ -866,21 +868,29 @@ class Game:
     # --- Fight loop ---
 
     def show_enemy_status(self, enemy):
-        ebar = hp_bar(enemy.hp, enemy.max_hp, 15)
+        ebar = hp_bar(enemy.hp, enemy.max_hp)
         name = enemy_display_name(enemy)
         tier = f" [{enemy.tier.upper()}]" if enemy.tier != "normal" else ""
         print(f"  {name}{tier}  {ebar} {enemy.hp}/{enemy.max_hp}")
 
     def play_fight(self, enemy, fight_num, total, act_num):
         clear()
+        rule = f"{C_DIM}{'─' * 45}{C_RESET}"
         print()
-        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
-        print(f"  {C_BWHITE}Act {act_num}  |  Fight {fight_num}/{total}{C_RESET}")
+        print(f"  {rule}")
+        act_label = f"ACT {act_num}"
+        fight_label = f"Fight {fight_num} of {total}"
+        padding = 45 - len(act_label) - len(fight_label)
+        print(f"  {C_BWHITE}{act_label}{' ' * padding}{fight_label}{C_RESET}")
+        print(f"  {rule}")
+        print()
         self.show_enemy_status(enemy)
         abilities = describe_abilities(enemy)
         for a in abilities:
-            print(f"    {C_YELLOW}{a}{C_RESET}")
-        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
+            print(f"  {C_YELLOW}{a}{C_RESET}")
+        print()
+        print(f"  {rule}")
+        print()
         self.show_status()
 
         hand_num = 0
@@ -900,7 +910,7 @@ class Game:
                 print()
                 self.show_enemy_status(enemy)
                 self.show_status()
-                print(f"  {C_DIM}{'·' * 20}{C_RESET}")
+                print(f"  {C_DIM}{'─ ' * 20}{C_RESET}")
 
             # Poison (every hand)
             if enemy.poison_per_hand and enemy.alive and self.player.alive:
