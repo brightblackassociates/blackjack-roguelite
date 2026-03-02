@@ -12,12 +12,12 @@ Usage:
 import argparse
 import time
 
-from config import GameConfig
-from simulate import (
+from .config import GameConfig
+from .simulate import (
     Simulator, STRATEGIES_BY_NAME,
     NeverCaptureStrategy, AlwaysCaptureStrategy,
 )
-from analyze import (
+from .analyze import (
     compute_metrics, evaluate_targets,
     generate_recommendations, print_report,
 )

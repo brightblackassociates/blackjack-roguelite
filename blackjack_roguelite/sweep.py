@@ -4,13 +4,13 @@ Rapid parameter sweep: test multiple configs in one shot.
 Shows which knobs move which metrics.
 """
 import copy
-from config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
-from simulate import (
+from .config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
+from .simulate import (
     Simulator, BasicStrategy, SmartStrategy, RandomStrategy,
     AlwaysCaptureStrategy, NeverCaptureStrategy,
     SmartRewardStrategy, HealFirstRewardStrategy, RemoveFirstRewardStrategy,
 )
-from analyze import compute_metrics
+from .analyze import compute_metrics
 
 
 def scale_enemy_hp(factor):

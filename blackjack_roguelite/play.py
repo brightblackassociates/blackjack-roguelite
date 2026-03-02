@@ -11,8 +11,8 @@ import time
 import tty
 import termios
 
-from config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
-from engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
+from .config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
+from .engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
                      RARITY_BUFFS, RARITY_WEIGHTS, RANKS, check_activation)
 
 
@@ -1233,6 +1233,10 @@ class Game:
         print()
 
 
-if __name__ == "__main__":
+def main():
     game = Game()
     game.run()
+
+
+if __name__ == "__main__":
+    main()

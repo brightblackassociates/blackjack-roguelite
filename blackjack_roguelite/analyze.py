@@ -3,8 +3,8 @@ Metrics computation, experience quality evaluation, and reporting.
 """
 from collections import Counter
 from typing import List, Dict
-from config import GameConfig, ExperienceTarget
-from engine import RunResult
+from .config import GameConfig, ExperienceTarget
+from .engine import RunResult
 
 
 # ---------------------------------------------------------------------------

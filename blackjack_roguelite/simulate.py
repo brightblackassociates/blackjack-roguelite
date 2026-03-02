@@ -4,8 +4,8 @@ Simulation harness: player strategies, capture strategies, reward strategies, ba
 import random
 from typing import List, Dict
 
-from config import GameConfig
-from engine import hand_value, RunEngine, RunResult, Companion
+from .config import GameConfig
+from .engine import hand_value, RunEngine, RunResult, Companion
 
 
 # ---------------------------------------------------------------------------

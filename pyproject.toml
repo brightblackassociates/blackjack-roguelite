@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blackjack-roguelite"
+version = "0.1.0"
+description = "Terminal blackjack roguelite -- beat enemies at 21, capture companions, survive 3 acts"
+requires-python = ">=3.8"
+license = "LicenseRef-Proprietary"
+
+[project.scripts]
+blackjack = "blackjack_roguelite.play:main"
+blackjack-sim = "blackjack_roguelite.main:main"

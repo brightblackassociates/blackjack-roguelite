@@ -6,8 +6,8 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
-import config as _cfg
-from config import GameConfig
+from . import config as _cfg
+from .config import GameConfig
 
 
 # ---------------------------------------------------------------------------
