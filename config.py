@@ -27,7 +27,7 @@ class DamageConfig:
     # If both bust, damage each side takes (0 = wash)
     both_bust_damage: int = 0
     # Damage dealt when player folds a hand
-    fold_damage: int = 2
+    fold_damage: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +294,15 @@ COMPANION_TEMPLATES = {
 
 
 # ---------------------------------------------------------------------------
+# Fold resource
+# ---------------------------------------------------------------------------
+@dataclass
+class FoldConfig:
+    starting_folds: int = 3
+    fold_reward_amount: int = 2
+
+
+# ---------------------------------------------------------------------------
 # Master config
 # ---------------------------------------------------------------------------
 @dataclass
@@ -304,6 +313,7 @@ class GameConfig:
     run: RunConfig = field(default_factory=RunConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     enchantment: EnchantmentConfig = field(default_factory=EnchantmentConfig)
+    fold: FoldConfig = field(default_factory=FoldConfig)
     experience_targets: list = field(
         default_factory=lambda: list(DEFAULT_EXPERIENCE_TARGETS)
     )

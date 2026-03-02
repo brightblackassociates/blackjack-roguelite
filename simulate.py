@@ -89,7 +89,10 @@ class SmartStrategy(Strategy):
         return "stand"
 
     def should_fold(self, hand_cards, player, enemy):
-        """Fold weak hands when low HP or vs raging enemies."""
+        """Fold weak hands when low HP or vs raging enemies. Requires folds remaining."""
+        if player.folds <= 0:
+            return False
+
         val = hand_value(hand_cards)
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
@@ -150,8 +153,9 @@ class RewardStrategy:
 
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
-                      heal_amount=0, can_capture=False, can_enchant=False):
-        """Return 'remove_card', 'heal', 'capture', or 'enchant'."""
+                      heal_amount=0, can_capture=False, can_enchant=False,
+                      can_fold_reward=False):
+        """Return 'remove_card', 'heal', 'capture', 'enchant', or 'fold_reward'."""
         raise NotImplementedError
 
     def choose_rank_to_remove(self, removable_ranks, rank_counts):
@@ -180,12 +184,17 @@ class SmartRewardStrategy(RewardStrategy):
 
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
-                      heal_amount=0, can_capture=False, can_enchant=False):
+                      heal_amount=0, can_capture=False, can_enchant=False,
+                      can_fold_reward=False):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
         # Capture companions when available and have slots
         if can_capture and player.can_capture():
             return "capture"
+
+        # Replenish folds when running low (0-1 remaining)
+        if can_fold_reward and player.folds <= 1:
+            return "fold_reward"
 
         # Heal when critically low
         if can_heal and hp_pct < 0.40:
@@ -245,7 +254,8 @@ class HealFirstRewardStrategy(RewardStrategy):
 
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
-                      heal_amount=0, can_capture=False, can_enchant=False):
+                      heal_amount=0, can_capture=False, can_enchant=False,
+                      can_fold_reward=False):
         if can_capture and player.can_capture():
             return "capture"
         if can_heal:
@@ -272,7 +282,8 @@ class RemoveFirstRewardStrategy(RewardStrategy):
 
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
-                      heal_amount=0, can_capture=False, can_enchant=False):
+                      heal_amount=0, can_capture=False, can_enchant=False,
+                      can_fold_reward=False):
         if can_capture and player.can_capture():
             return "capture"
         if can_remove:

@@ -236,7 +236,61 @@ class Game:
             hp=self.config.player.starting_hp,
             max_hp=self.config.player.starting_hp,
             max_companion_slots=self.config.player.max_companion_slots,
+            folds=self.config.fold.starting_folds,
         )
+
+    # --- Rules screen ---
+
+    def show_rules(self):
+        print()
+        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
+        print(f"  {C_BWHITE}  RULES & REFERENCE{C_RESET}")
+        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
+        print()
+        print(f"  {C_BWHITE}Goal:{C_RESET} Survive 3 acts (15 fights total).")
+        print(f"  Each fight is a series of blackjack hands.")
+        print(f"  Get closer to 21 than the enemy to deal damage.")
+        print(f"  Go over 21 and you bust (take extra damage).")
+        print()
+        print(f"  {C_BWHITE}Controls:{C_RESET}")
+        print(f"    {C_GREEN}\u2192{C_RESET} Hit (draw a card)")
+        print(f"    {C_GREEN}\u2190{C_RESET} Stand (keep your hand)")
+        print(f"    \u2193 Fold (take {self.config.damage.fold_damage} dmg, costs 1 fold)")
+        print(f"    \u2191 Info panel (enemy, companions, deck)")
+        print(f"    r Rules (this screen)")
+        print()
+        print(f"  {C_BWHITE}Folds:{C_RESET} Limited resource. Start with {self.config.fold.starting_folds}.")
+        print(f"  Folding costs 1 fold and {self.config.damage.fold_damage} HP.")
+        print(f"  Better than losing (3-7 HP), but you give up")
+        print(f"  the chance to win. Earn +{self.config.fold.fold_reward_amount} folds as a reward after wins.")
+        print()
+        print(f"  {C_BWHITE}Rewards{C_RESET} (after each win, pick one):")
+        print(f"    Remove a card (thin your deck, raise avg hand)")
+        print(f"    Enchant a card (fury/siphon/ward)")
+        print(f"    Heal HP")
+        print(f"    Gain {self.config.fold.fold_reward_amount} folds")
+        print(f"    Capture companion (normal enemies only)")
+        print()
+        print(f"  {C_BWHITE}Companions:{C_RESET} Passive effects during combat.")
+        print(f"  Some require specific cards in hand to activate.")
+        print(f"  Gain XP each fight and level up (max Lv5).")
+        print()
+        print(f"  {C_BWHITE}Enchantments:{C_RESET}")
+        print(f"    {C_RED}Fury{C_RESET}   +{self.config.enchantment.fury_damage} bonus damage on wins")
+        print(f"    {C_CYAN}Siphon{C_RESET} Heal {self.config.enchantment.siphon_heal} per enchanted card in hand")
+        print(f"    {C_YELLOW}Ward{C_RESET}   -{self.config.enchantment.ward_reduction} damage on losses")
+        print(f"  Stacks diminish: +{self.config.enchantment.diminishing:.0%} per extra copy.")
+        print()
+        print(f"  {C_BWHITE}Enemy abilities:{C_RESET}")
+        print(f"    Reckless: hits extra times (volatile)")
+        print(f"    Shell: absorbs damage each hand")
+        print(f"    Nine Lives: may survive a killing blow once")
+        print(f"    Rage: bonus damage grows each hand")
+        print(f"    Poison: flat damage every hand, win or lose")
+        print(f"    Drain: heals when it hurts you")
+        print(f"    Inferno: forces you to hit extra")
+        print()
+        pause()
 
     # --- Enchantment helpers ---
 
@@ -325,6 +379,7 @@ class Game:
     def show_status(self):
         bar = hp_bar(self.player.hp, self.player.max_hp)
         parts = [f"HP {bar} {self.player.hp}/{self.player.max_hp}"]
+        parts.append(f"Folds: {self.player.folds}")
         if self.player.companions:
             comp_strs = []
             for c in self.player.companions:
@@ -451,6 +506,10 @@ class Game:
         else:
             slots = self.player.max_companion_slots
             add(f"  {C_DIM}No companions (0/{slots}){C_RESET}")
+
+        # --- Folds section ---
+        divider()
+        add(f"  Folds remaining: {self.player.folds}")
 
         # --- Deck section ---
         divider()
@@ -596,20 +655,28 @@ class Game:
                 bust_color = C_GREEN
             bust_str = f"{bust_color}bust: {bust_pct:.0f}%{C_RESET}"
 
-            arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO"}
+            arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES"}
 
             threshold_str = f"plays to {enemy.hit_threshold}"
+            can_fold = first_decision and self.player.folds > 0
 
-            if first_decision:
+            if can_fold:
+                fold_str = f"\u2193 Fold ({self.player.folds})"
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2193 Fold  \u2191 Info   ({threshold_str} | {bust_str} | deck: {deck_ct})",
-                    ["right", "left", "down", "up"],
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  {fold_str}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    ["right", "left", "down", "up", "r"],
+                    arrow_labels,
+                )
+            elif first_decision:
+                choice = prompt_choice(
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  {C_DIM}\u2193 Fold (0){C_RESET}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    ["right", "left", "up", "r"],
                     arrow_labels,
                 )
             else:
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info   ({threshold_str} | {bust_str} | deck: {deck_ct})",
-                    ["right", "left", "up"],
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info  r Rules   ({threshold_str} | {bust_str} | deck: {deck_ct})",
+                    ["right", "left", "up", "r"],
                     arrow_labels,
                 )
 
@@ -617,11 +684,16 @@ class Game:
                 self.inspect_panel(enemy, player_cards)
                 continue
 
+            if choice == "r":
+                self.show_rules()
+                continue
+
             first_decision = False
 
             if choice == "down":
+                self.player.folds -= 1
                 fold_dmg = self.config.damage.fold_damage
-                print(f"  Folded. Take {fold_dmg} chip damage.")
+                print(f"  Folded. Take {fold_dmg} chip damage. ({self.player.folds} folds left)")
                 self.hurt_player(fold_dmg)
                 return "fold"
 
@@ -909,6 +981,10 @@ class Game:
         if enchantable:
             options.append(("Enchant a card", "enchant"))
 
+        # Option: Gain folds
+        fold_amt = self.config.fold.fold_reward_amount
+        options.append((f"Gain {fold_amt} folds", "fold_reward"))
+
         # Option: Capture companion (always shown, but can fail)
         can_capture = False
         template = None
@@ -937,7 +1013,10 @@ class Game:
         choice = prompt_choice("  Choose:", valid_keys, labels)
         action = action_map[choice]
 
-        if action == "remove" and removable:
+        if action == "fold_reward":
+            self.player.folds += self.config.fold.fold_reward_amount
+            print(f"  {C_GREEN}+{self.config.fold.fold_reward_amount} folds!{C_RESET} ({self.player.folds} total)")
+        elif action == "remove" and removable:
             self._card_removal_ui()
         elif action == "enchant":
             self._enchantment_ui()
@@ -1101,11 +1180,11 @@ class Game:
         print("  Bust and you take the hit instead.")
         print()
         print("  After each win, choose a reward:")
-        print("  Remove a card, enchant a card, heal, or")
-        print("  capture a companion. Enchantments stack.")
+        print("  Remove a card, enchant, heal, gain folds,")
+        print("  or capture a companion. Enchantments stack.")
         print("  Survive 3 acts to win.")
         print()
-        print("  Controls: \u2192 hit, \u2190 stand, \u2193 fold, \u2191 info")
+        print("  Controls: \u2192 hit, \u2190 stand, \u2193 fold, \u2191 info, r rules")
         print()
         pause()
 

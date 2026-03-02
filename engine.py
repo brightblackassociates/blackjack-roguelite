@@ -224,6 +224,7 @@ class Player:
     companions: List[Companion] = field(default_factory=list)
     max_companion_slots: int = 3
     gold: int = 0
+    folds: int = 0
 
     @property
     def alive(self) -> bool:
@@ -304,6 +305,7 @@ class RunResult:
     companion_levels: Dict[str, int] = field(default_factory=dict)
     cards_removed: int = 0
     enchantments_applied: int = 0
+    fold_rewards: int = 0
     rewards_chosen: List[str] = field(default_factory=list)
 
 
@@ -333,9 +335,10 @@ class CombatEngine:
         highlights: List[str] = []
 
         # --- Fold check (before anything else) ---
-        if hasattr(strategy, 'should_fold') and strategy.should_fold(
-            player_cards, player, enemy
-        ):
+        if (player.folds > 0
+            and hasattr(strategy, 'should_fold')
+            and strategy.should_fold(player_cards, player, enemy)):
+            player.folds -= 1
             p_val = hand_value(player_cards)
             e_val = hand_value(enemy_cards)
             return HandResult(
@@ -753,6 +756,7 @@ class RunEngine:
             hp=self.config.player.starting_hp,
             max_hp=self.config.player.starting_hp,
             max_companion_slots=self.config.player.max_companion_slots,
+            folds=self.config.fold.starting_folds,
         )
 
         encounters = self._generate_encounters()
@@ -760,6 +764,7 @@ class RunEngine:
         current_act = -1
         cards_removed = 0
         enchantments_applied = 0
+        fold_rewards = 0
         rewards_chosen = []
 
         for enemy_key, act in encounters:
@@ -800,6 +805,7 @@ class RunEngine:
                     heal_amount=heal_amount,
                     can_capture=can_capture,
                     can_enchant=can_enchant,
+                    can_fold_reward=True,
                 )
 
                 if choice == "remove_card":
@@ -831,6 +837,9 @@ class RunEngine:
                                 card, etype, ecfg.max_per_card
                             ):
                                 enchantments_applied += 1
+                elif choice == "fold_reward":
+                    player.folds += self.config.fold.fold_reward_amount
+                    fold_rewards += 1
                 elif choice == "heal":
                     player.heal(heal_amount)
                 elif choice == "capture" and can_capture:
@@ -867,5 +876,6 @@ class RunEngine:
             companion_levels={c.name: c.level for c in player.companions},
             cards_removed=cards_removed,
             enchantments_applied=enchantments_applied,
+            fold_rewards=fold_rewards,
             rewards_chosen=rewards_chosen,
         )
