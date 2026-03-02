@@ -4,6 +4,7 @@ Blackjack Roguelite -- Interactive Terminal Game
 Run: python3 play.py
 """
 import random
+import re
 import sys
 import os
 import time
@@ -12,7 +13,7 @@ import termios
 
 from config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
 from engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
-                     RARITY_BUFFS, RARITY_WEIGHTS, check_activation)
+                     RARITY_BUFFS, RARITY_WEIGHTS, RANKS, check_activation)
 
 
 # --- ANSI color for enemy rarity ---
@@ -22,7 +23,17 @@ RARITY_COLORS = {
     "elite":  "\033[38;5;208m", # orange
     "epic":   "\033[31m",       # red
 }
-ANSI_RESET = "\033[0m"
+# --- ANSI formatting constants ---
+C_RESET   = "\033[0m"
+C_DIM     = "\033[2m"
+C_RED     = "\033[31m"
+C_GREEN   = "\033[32m"
+C_YELLOW  = "\033[33m"
+C_CYAN    = "\033[36m"
+C_BRED    = "\033[1;31m"   # bold red
+C_BGREEN  = "\033[1;32m"   # bold green
+C_BYELLOW = "\033[1;33m"   # bold yellow
+C_BWHITE  = "\033[1;37m"   # bold white
 
 
 def colorize(text, rarity):
@@ -30,7 +41,7 @@ def colorize(text, rarity):
     code = RARITY_COLORS.get(rarity, "")
     if not code:
         return text
-    return f"{code}{text}{ANSI_RESET}"
+    return f"{code}{text}{C_RESET}"
 
 
 def enemy_display_name(enemy):
@@ -56,6 +67,16 @@ def activation_hint(activation):
     return info.get("hint", "")
 
 
+def colorize_hint(activation):
+    """Return activation hint with ANSI color (red for suit symbols)."""
+    hint = activation_hint(activation)
+    if not hint:
+        return ""
+    if "\u2665" in hint or "\u2666" in hint:
+        return f"{C_RED}{hint}{C_RESET}"
+    return hint
+
+
 def activation_desc(activation):
     """Full description like 'two red cards (♥♦) in hand'."""
     info = ACTIVATION_INFO.get(activation, {})
@@ -64,19 +85,40 @@ def activation_desc(activation):
 
 SUIT_SYM = {"H": "\u2665", "D": "\u2666", "C": "\u2663", "S": "\u2660"}
 
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def plain_len(s):
+    """Visible character length, ignoring ANSI escape codes."""
+    return len(_ANSI_RE.sub('', s))
+
 
 def show_card(c):
-    return f"{c.rank}{SUIT_SYM[c.suit]}"
+    text = f"{c.rank}{SUIT_SYM[c.suit]}"
+    if c.suit in ("H", "D"):
+        return f"{C_RED}{text}{C_RESET}"
+    return text
 
 
 def show_hand(cards):
     return "  ".join(show_card(c) for c in cards)
 
 
+def hp_color(current, maximum):
+    """ANSI color code based on HP percentage: green/yellow/red."""
+    pct = max(0, current / maximum)
+    if pct > 0.5:
+        return C_GREEN
+    elif pct > 0.25:
+        return C_YELLOW
+    return C_RED
+
+
 def hp_bar(current, maximum, width=20):
     pct = max(0, current / maximum)
     filled = int(width * pct)
-    return "[" + "#" * filled + "." * (width - filled) + "]"
+    color = hp_color(current, maximum)
+    return f"[{color}{'#' * filled}{C_RESET}{C_DIM}{'.' * (width - filled)}{C_RESET}]"
 
 
 def read_key():
@@ -97,7 +139,7 @@ def read_key():
 
 def prompt_choice(msg, valid, labels=None):
     """Prompt for a choice. valid = list of keys. labels = dict of key->display name."""
-    sys.stdout.write(f"  {msg} ")
+    sys.stdout.write(f"  {msg} \033[5m\u25b8\033[0m ")
     sys.stdout.flush()
     while True:
         try:
@@ -167,15 +209,20 @@ def describe_abilities(enemy):
     return parts
 
 
-def describe_companion_effect(effect_type):
-    labels = {
-        "damage_multiplier": "damage multiplier on wins",
-        "damage_reduction_pct": "% damage reduction on losses",
-        "natural_21_multiplier": "natural 21 damage multiplier",
-        "peek_enemy": "see enemy's hole card",
-        "unbust_chance": "chance to undo a bust",
-    }
-    return labels.get(effect_type, effect_type)
+EFFECT_LABELS = {
+    "damage_multiplier":     ("dmg on wins",   "damage multiplier on wins"),
+    "damage_reduction_pct":  ("dmg reduction", "% damage reduction on losses"),
+    "natural_21_multiplier": ("nat 21 dmg",    "natural 21 damage multiplier"),
+    "peek_enemy":            ("peek hole card", "see enemy's hole card"),
+    "unbust_chance":         ("save on bust",  "chance to undo a bust"),
+}
+
+
+def describe_companion_effect(effect_type, short=False):
+    entry = EFFECT_LABELS.get(effect_type)
+    if not entry:
+        return effect_type
+    return entry[0] if short else entry[1]
 
 
 # -----------------------------------------------------------------------
@@ -217,7 +264,7 @@ class Game:
         if ench["siphon"] > 0:
             heal = int(self._ench_total(self.config.enchantment.siphon_heal, ench["siphon"]))
             self.player.heal(heal)
-            print(f"  Siphon x{ench['siphon']}: heal {heal}! ({self.player.hp}/{self.player.max_hp})")
+            print(f"  {C_CYAN}Siphon x{ench['siphon']}: heal {heal}!{C_RESET} ({self.player.hp}/{self.player.max_hp})")
 
     def base_damage(self, winner_val, loser_val):
         cfg = self.config.damage
@@ -281,9 +328,9 @@ class Game:
         if self.player.companions:
             comp_strs = []
             for c in self.player.companions:
-                hint = activation_hint(c.activation)
-                suffix = f" [{hint}]" if hint else ""
-                comp_strs.append(f"{c.name} Lv{c.level}{suffix}")
+                hint_c = colorize_hint(c.activation)
+                suffix = f" [{hint_c}]" if hint_c else ""
+                comp_strs.append(f"{C_CYAN}{c.name}{C_RESET} Lv{c.level}{suffix}")
             parts.append(", ".join(comp_strs))
         print(f"  {' | '.join(parts)}")
 
@@ -294,90 +341,162 @@ class Game:
             absorbed = min(raw_dmg, enemy.damage_absorption)
             raw_dmg = max(0, raw_dmg - enemy.damage_absorption)
             if show:
-                print(f"  -{absorbed:.0f} shell -> {raw_dmg:.0f}")
+                print(f"  {C_YELLOW}-{absorbed:.0f} shell -> {raw_dmg:.0f}{C_RESET}")
         actual = int(raw_dmg)
         enemy.hp = max(0, enemy.hp - actual)
         if show:
             ebar = hp_bar(enemy.hp, enemy.max_hp, 10)
-            print(f"  >> {actual} to {enemy_display_name(enemy)}  {ebar} {enemy.hp}/{enemy.max_hp}")
+            print(f"  {C_GREEN}>> {actual} to {enemy_display_name(enemy)}{C_RESET}  {ebar} {enemy.hp}/{enemy.max_hp}")
 
     def hurt_player(self, dmg, show=True):
         actual = int(dmg)
         self.player.take_damage(actual)
         if show:
             bar = hp_bar(self.player.hp, self.player.max_hp)
-            print(f"  << Take {actual}  {bar} {self.player.hp}/{self.player.max_hp}")
+            print(f"  {C_RED}<< Take {actual}{C_RESET}  {bar} {self.player.hp}/{self.player.max_hp}")
 
     # --- Inspect panel ---
 
-    def inspect_enemy(self, enemy):
-        """Show a box-drawn info panel about the current enemy."""
+    _DIVIDER = object()  # sentinel for section dividers
+
+    def inspect_panel(self, enemy, player_cards):
+        """Show info panel: enemy, companions, deck state."""
+        lines = []  # display strings (may contain ANSI codes)
+        DIV = self._DIVIDER
+
+        def add(line):
+            lines.append(line)
+
+        def divider():
+            lines.append(DIV)
+
+        # --- Enemy section ---
         name = enemy_display_name(enemy)
-        # For width calculation, strip ANSI codes
-        plain_name = enemy.name
-        if enemy.rarity != "common":
-            plain_name = f"{enemy.name} ({enemy.rarity.capitalize()})"
-        hp_str = f"{enemy.hp}/{enemy.max_hp}"
-        header = f"  {plain_name}        {hp_str}"
+        ebar = hp_bar(enemy.hp, enemy.max_hp, 10)
+        add(f"  {name}  {ebar} {enemy.hp}/{enemy.max_hp}")
+        add(f"  Plays until {enemy.hit_threshold}")
 
-        # Build content lines (plain text for width, display text separate)
-        lines_plain = []
-        lines_display = []
-
-        # Header line
-        hdr_plain = f"  {plain_name}  {hp_str}"
-        hdr_display = f"  {name}  {hp_str}"
-        lines_plain.append(hdr_plain)
-        lines_display.append(hdr_display)
-
-        # Plays until
-        lines_plain.append(f"  Plays until {enemy.hit_threshold}")
-        lines_display.append(f"  Plays until {enemy.hit_threshold}")
-
-        # Blank line
-        lines_plain.append("")
-        lines_display.append("")
-
-        # Abilities with dynamic state
         abilities = []
         if enemy.reckless_extra:
-            abilities.append(f"  Reckless: hits {enemy.reckless_extra} extra time(s)")
+            abilities.append(f"  Reckless: hits {enemy.reckless_extra} extra")
         if enemy.damage_absorption:
-            abilities.append(f"  Shell: absorbs {enemy.damage_absorption} damage per hand")
+            abilities.append(f"  Shell: absorbs {enemy.damage_absorption} dmg/hand")
         if enemy.nine_lives_chance > 0:
-            abilities.append(f"  Nine Lives: {enemy.nine_lives_chance:.0%} chance to survive death")
+            abilities.append(f"  Nine Lives: {enemy.nine_lives_chance:.0%} survive death")
         elif getattr(enemy, '_nine_lives_spent', False):
             abilities.append(f"  Nine Lives: spent")
         if enemy.rage_per_hand:
-            abilities.append(f"  Rage: +{enemy.rage_per_hand} bonus damage per hand.")
-            abilities.append(f"        Currently at +{enemy.bonus_damage}.")
+            abilities.append(f"  Rage: +{enemy.rage_per_hand}/hand (now +{enemy.bonus_damage})")
         if enemy.poison_per_hand:
-            abilities.append(f"  Poison: {enemy.poison_per_hand} damage every hand")
+            abilities.append(f"  Poison: {enemy.poison_per_hand} dmg/hand")
         if enemy.drain:
-            abilities.append(f"  Drain: heals when it hurts you")
+            abilities.append(f"  Drain: heals on hit")
         if enemy.forced_extra_hits:
-            abilities.append(f"  Inferno: forces you to hit {enemy.forced_extra_hits} extra time(s)")
+            abilities.append(f"  Inferno: forces {enemy.forced_extra_hits} extra hit(s)")
         if enemy.bonus_damage and not enemy.rage_per_hand:
             abilities.append(f"  Bonus damage: +{enemy.bonus_damage}")
 
         if abilities:
+            add("")
             for a in abilities:
-                lines_plain.append(a)
-                lines_display.append(a)
+                add(f"{C_YELLOW}{a}{C_RESET}")
         else:
-            lines_plain.append("  No special abilities.")
-            lines_display.append("  No special abilities.")
+            add("")
+            add(f"  {C_DIM}No special abilities.{C_RESET}")
 
-        # Calculate box width
-        max_width = max(len(lp) for lp in lines_plain) + 2
-        max_width = max(max_width, 30)  # minimum width
+        # --- Companions section ---
+        divider()
+        if self.player.companions:
+            add(f"  {C_BWHITE}COMPANIONS{C_RESET} {C_DIM}({len(self.player.companions)}/{self.player.max_companion_slots}){C_RESET}")
+
+            for c in self.player.companions:
+                effect_label = describe_companion_effect(c.effect_type, short=True)
+
+                # Format effect value
+                if "multiplier" in c.effect_type:
+                    val_str = f"x{c.effect_value:.2f}"
+                elif "pct" in c.effect_type or "chance" in c.effect_type:
+                    val_str = f"{c.effect_value * 100:.0f}%"
+                else:
+                    val_str = ""
+
+                # Check activation against current hand
+                if c.activation in ("two_red", "two_black"):
+                    active = check_activation(player_cards, c.activation)
+                else:
+                    active = None  # contextual, not card-composition
+
+                line = f"  {C_CYAN}{c.name}{C_RESET} Lv{c.level}"
+                if val_str:
+                    line += f"  {val_str} {effect_label}"
+                else:
+                    line += f"  {effect_label}"
+
+                # Activation indicator
+                hint_c = colorize_hint(c.activation)
+                if hint_c:
+                    if active is True:
+                        line += f"  [{hint_c} {C_GREEN}\u2713{C_RESET}]"
+                    elif active is False:
+                        hint_raw = activation_hint(c.activation)
+                        line += f"  {C_DIM}[{hint_raw}]{C_RESET}"
+                    else:
+                        line += f"  [{hint_c}]"
+                elif c.activation == "on_bust":
+                    line += f"  {C_DIM}[on bust]{C_RESET}"
+                elif c.activation == "natural_21":
+                    line += f"  {C_DIM}[nat 21]{C_RESET}"
+
+                add(line)
+        else:
+            slots = self.player.max_companion_slots
+            add(f"  {C_DIM}No companions (0/{slots}){C_RESET}")
+
+        # --- Deck section ---
+        divider()
+        total_removed = 52 - self.deck.template_size
+        if total_removed > 0:
+            add(f"  {C_BWHITE}DECK{C_RESET}  {self.deck.template_size} cards {C_DIM}({total_removed} removed){C_RESET}")
+        else:
+            add(f"  {C_BWHITE}DECK{C_RESET}  {self.deck.template_size} cards")
+
+        counts = self.deck.rank_counts()
+        thinned = [(r, counts.get(r, 0)) for r in RANKS if 0 < counts.get(r, 0) < 4]
+        gone = [r for r in RANKS if counts.get(r, 0) == 0]
+
+        if thinned:
+            parts = [f"{r}:{ct}" for r, ct in thinned]
+            add(f"  Thinned: {', '.join(parts)}")
+        if gone:
+            add(f"  {C_DIM}Gone: {', '.join(gone)}{C_RESET}")
+
+        ench_summary = self.deck.enchanted_cards_summary()
+        if ench_summary:
+            ench_counts = {"fury": 0, "siphon": 0, "ward": 0}
+            for _card, enchs in ench_summary:
+                for e in enchs:
+                    if e in ench_counts:
+                        ench_counts[e] += 1
+            parts = [f"{ct}\u00d7 {n.capitalize()}" for n, ct in ench_counts.items() if ct > 0]
+            if parts:
+                add(f"  {C_CYAN}Enchanted: {', '.join(parts)}{C_RESET}")
+
+        draw_remaining = len(self.deck.cards)
+        add(f"  {C_DIM}Draw pile: {draw_remaining}{C_RESET}")
+
+        # --- Render box ---
+        max_width = max((plain_len(l) for l in lines if l is not DIV), default=30) + 2
+        max_width = max(max_width, 34)
 
         print()
-        print(f"  \u250c{'─' * max_width}\u2510")
-        for lp, ld in zip(lines_plain, lines_display):
-            padding = max_width - len(lp)
-            print(f"  \u2502{ld}{' ' * padding}\u2502")
-        print(f"  \u2514{'─' * max_width}\u2518")
+        print(f"  {C_DIM}\u250c{'─' * max_width}\u2510{C_RESET}")
+        for line in lines:
+            if line is DIV:
+                print(f"  {C_DIM}\u251c{'─' * max_width}\u2524{C_RESET}")
+            else:
+                padding = max_width - plain_len(line)
+                print(f"  {C_DIM}\u2502{C_RESET}{line}{' ' * padding}{C_DIM}\u2502{C_RESET}")
+        print(f"  {C_DIM}\u2514{'─' * max_width}\u2518{C_RESET}")
         print()
 
     # --- Hand logic ---
@@ -387,7 +506,7 @@ class Game:
         enemy_cards = [self.deck.draw(), self.deck.draw()]
         has_peek = self.player.get_companion_effect("peek_enemy", player_cards) is not None
 
-        print(f"\n  -- Hand {hand_num} --")
+        print(f"\n  {C_BWHITE}-- Hand {hand_num} --{C_RESET}")
 
         # --- Naturals ---
         p_nat = is_natural_21(player_cards)
@@ -398,17 +517,17 @@ class Game:
             print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}")
             beat(0.4)
             if p_nat and e_nat:
-                print("  Both natural 21! Push.")
+                print(f"  {C_YELLOW}Both natural 21! Push.{C_RESET}")
                 self._apply_siphon(player_cards)
                 return
             if p_nat:
-                print("  NATURAL 21!")
+                print(f"  {C_BGREEN}NATURAL 21!{C_RESET}")
                 beat(0.3)
                 dmg = self._calc_win_damage(21, hand_value(enemy_cards), is_natural=True, player_cards=player_cards)
                 self.hurt_enemy(enemy, dmg)
                 self._apply_siphon(player_cards)
                 return
-            print("  Enemy natural 21!")
+            print(f"  {C_BRED}Enemy natural 21!{C_RESET}")
             beat(0.3)
             dmg = self._calc_loss_damage(21, hand_value(player_cards), is_natural=True,
                                          player_cards=player_cards, bonus_damage=enemy.bonus_damage)
@@ -421,7 +540,7 @@ class Game:
         # --- Show starting hands ---
         print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
         if has_peek:
-            print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}  [Shadow Thief]")
+            print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
         else:
             print(f"  Enemy: {show_card(enemy_cards[0])}  ??")
 
@@ -437,20 +556,20 @@ class Game:
                 unbust = self.player.get_companion_effect("unbust_chance", player_cards)
                 if unbust and random.random() < unbust:
                     removed = player_cards.pop()
-                    print(f"  Goblin Shaman saves you! Tossed {show_card(removed)}")
+                    print(f"  {C_CYAN}Goblin Shaman saves you!{C_RESET} Tossed {show_card(removed)}")
                     print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
                     continue
                 player_busted = True
                 beat(0.3)
-                print(f"  BUST! ({p_val})")
+                print(f"  {C_BRED}BUST!{C_RESET} ({p_val})")
                 break
 
             if p_val == 21:
-                print(f"  21!")
+                print(f"  {C_GREEN}21!{C_RESET}")
                 break
 
             if forced > 0:
-                print(f"  Inferno forces you to hit!")
+                print(f"  {C_YELLOW}Inferno forces you to hit!{C_RESET}")
                 forced -= 1
                 card = self.deck.draw()
                 player_cards.append(card)
@@ -461,23 +580,31 @@ class Game:
             bust_pct = self.deck.bust_probability(player_cards) * 100
             deck_ct = len(self.deck.cards)
 
+            if bust_pct > 70:
+                bust_color = C_RED
+            elif bust_pct >= 20:
+                bust_color = C_YELLOW
+            else:
+                bust_color = C_GREEN
+            bust_str = f"{bust_color}bust: {bust_pct:.0f}%{C_RESET}"
+
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO"}
 
             if first_decision:
                 choice = prompt_choice(
-                    f"\u2192 Hit  \u2190 Stand  \u2193 Fold  \u2191 Info   (bust: {bust_pct:.0f}% | deck: {deck_ct})",
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2193 Fold  \u2191 Info   ({bust_str} | deck: {deck_ct})",
                     ["right", "left", "down", "up"],
                     arrow_labels,
                 )
             else:
                 choice = prompt_choice(
-                    f"\u2192 Hit  \u2190 Stand  \u2191 Info   (bust: {bust_pct:.0f}% | deck: {deck_ct})",
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info   ({bust_str} | deck: {deck_ct})",
                     ["right", "left", "up"],
                     arrow_labels,
                 )
 
             if choice == "up":
-                self.inspect_enemy(enemy)
+                self.inspect_panel(enemy, player_cards)
                 continue
 
             first_decision = False
@@ -529,29 +656,29 @@ class Game:
                 beat(0.3)
                 card = self.deck.draw()
                 enemy_cards.append(card)
-                print(f"  Reckless!    {show_card(card)}  -> {hand_value(enemy_cards)}")
+                print(f"  {C_YELLOW}Reckless!{C_RESET}    {show_card(card)}  -> {hand_value(enemy_cards)}")
 
         e_val = hand_value(enemy_cards)
         enemy_busted = e_val > 21
 
         if enemy_busted:
             beat(0.3)
-            print(f"  ENEMY BUSTS! ({e_val})")
+            print(f"  {C_BGREEN}ENEMY BUSTS!{C_RESET} ({e_val})")
 
         # --- Resolve ---
         beat(0.4)
         if enemy_busted:
-            print(f"  You win! {p_val} vs BUST")
+            print(f"  {C_GREEN}You win!{C_RESET} {p_val} vs BUST")
             beat(0.2)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
         elif p_val > e_val:
-            print(f"  You win! {p_val} vs {e_val}")
+            print(f"  {C_GREEN}You win!{C_RESET} {p_val} vs {e_val}")
             beat(0.2)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
         elif e_val > p_val:
-            print(f"  You lose. {p_val} vs {e_val}")
+            print(f"  {C_RED}You lose.{C_RESET} {p_val} vs {e_val}")
             beat(0.2)
             dmg = self._calc_loss_damage(e_val, p_val, player_cards=player_cards,
                                          bonus_damage=enemy.bonus_damage)
@@ -559,41 +686,41 @@ class Game:
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
         else:
-            print(f"  Push. Both {p_val}.")
+            print(f"  {C_YELLOW}Push.{C_RESET} Both {p_val}.")
         self._apply_siphon(player_cards)
 
     def _calc_win_damage(self, p_val, e_val, is_natural=False, player_cards=None):
         cfg = self.config.damage
         if cfg.model == "differential":
             base = float(max(p_val - e_val, cfg.damage_floor))
-            print(f"  {p_val} - {e_val} = {base:.0f}")
+            print(f"  {C_DIM}{p_val} - {e_val} = {base:.0f}{C_RESET}")
         else:
             base = float(max(p_val - cfg.damage_subtract, 1))
-            print(f"  {p_val} - {cfg.damage_subtract} = {base:.0f}")
+            print(f"  {C_DIM}{p_val} - {cfg.damage_subtract} = {base:.0f}{C_RESET}")
         dmg = base
         if is_natural:
             cat_mult = self.player.get_companion_effect("natural_21_multiplier", player_cards)
             if cat_mult:
                 dmg *= cat_mult
-                print(f"  x{cat_mult:.1f} Lucky Cat -> {dmg:.0f}")
+                print(f"  {C_CYAN}x{cat_mult:.1f} Lucky Cat -> {dmg:.0f}{C_RESET}")
             else:
                 dmg *= cfg.natural_21_multiplier
-                print(f"  x{cfg.natural_21_multiplier:.1f} natural -> {dmg:.0f}")
+                print(f"  {C_DIM}x{cfg.natural_21_multiplier:.1f} natural -> {dmg:.0f}{C_RESET}")
         else:
             margin = p_val - e_val
             if margin >= cfg.margin_bonus_threshold:
                 dmg *= cfg.margin_bonus_multiplier
-                print(f"  x{cfg.margin_bonus_multiplier:.1f} margin ({margin}pt) -> {dmg:.0f}")
+                print(f"  {C_DIM}x{cfg.margin_bonus_multiplier:.1f} margin ({margin}pt) -> {dmg:.0f}{C_RESET}")
         imp_mult = self.player.get_companion_effect("damage_multiplier", player_cards)
         if imp_mult:
             dmg *= imp_mult
-            print(f"  x{imp_mult:.2f} Fire Imp [\u2665\u2666] -> {dmg:.0f}")
+            print(f"  {C_CYAN}x{imp_mult:.2f} Fire Imp [\u2665\u2666] -> {dmg:.0f}{C_RESET}")
         if player_cards:
             ench = self._count_enchantments(player_cards)
             if ench["fury"] > 0:
                 fury_bonus = self._ench_total(self.config.enchantment.fury_damage, ench["fury"])
                 dmg += fury_bonus
-                print(f"  +{fury_bonus:.0f} Fury x{ench['fury']} -> {dmg:.0f}")
+                print(f"  {C_CYAN}+{fury_bonus:.0f} Fury x{ench['fury']} -> {dmg:.0f}{C_RESET}")
         return dmg
 
     def _calc_loss_damage(self, e_val, p_val, is_natural=False, is_bust=False,
@@ -601,37 +728,37 @@ class Game:
         cfg = self.config.damage
         if cfg.model == "differential":
             base = float(max(e_val - p_val, cfg.damage_floor))
-            print(f"  {e_val} - {p_val} = {base:.0f}")
+            print(f"  {C_DIM}{e_val} - {p_val} = {base:.0f}{C_RESET}")
         else:
             base = float(max(e_val - cfg.damage_subtract, 1))
-            print(f"  {e_val} - {cfg.damage_subtract} = {base:.0f}")
+            print(f"  {C_DIM}{e_val} - {cfg.damage_subtract} = {base:.0f}{C_RESET}")
         dmg = base
         if is_bust:
             dmg *= cfg.bust_penalty_multiplier
-            print(f"  x{cfg.bust_penalty_multiplier:.1f} bust -> {dmg:.0f}")
+            print(f"  {C_DIM}x{cfg.bust_penalty_multiplier:.1f} bust -> {dmg:.0f}{C_RESET}")
         if is_natural:
             dmg *= cfg.natural_21_multiplier
-            print(f"  x{cfg.natural_21_multiplier:.1f} natural -> {dmg:.0f}")
+            print(f"  {C_DIM}x{cfg.natural_21_multiplier:.1f} natural -> {dmg:.0f}{C_RESET}")
         reduction_pct = self.player.get_companion_effect("damage_reduction_pct", player_cards)
         if reduction_pct:
             reduced = dmg * reduction_pct
             dmg = max(0, dmg - reduced)
-            print(f"  -{reduction_pct*100:.0f}% Shield Turtle [\u2663\u2660] -> {dmg:.0f}")
+            print(f"  {C_CYAN}-{reduction_pct*100:.0f}% Shield Turtle [\u2663\u2660] -> {dmg:.0f}{C_RESET}")
         if player_cards:
             ench = self._count_enchantments(player_cards)
             if ench["ward"] > 0:
                 ward_red = self._ench_total(self.config.enchantment.ward_reduction, ench["ward"])
                 dmg = max(0, dmg - ward_red)
-                print(f"  -{ward_red:.0f} Ward x{ench['ward']} -> {dmg:.0f}")
+                print(f"  {C_CYAN}-{ward_red:.0f} Ward x{ench['ward']} -> {dmg:.0f}{C_RESET}")
         if bonus_damage > 0:
             dmg += bonus_damage
-            print(f"  +{bonus_damage} rage -> {dmg:.0f}")
+            print(f"  {C_DIM}+{bonus_damage} rage -> {dmg:.0f}{C_RESET}")
         return dmg
 
     def _apply_drain(self, enemy, dmg):
         heal = max(1, int(dmg))
         enemy.hp = min(enemy.max_hp, enemy.hp + heal)
-        print(f"  Lich drains {heal} HP! ({enemy.hp}/{enemy.max_hp})")
+        print(f"  {C_RED}Lich drains {heal} HP!{C_RESET} ({enemy.hp}/{enemy.max_hp})")
 
     # --- Fight loop ---
 
@@ -644,13 +771,13 @@ class Game:
     def play_fight(self, enemy, fight_num, total, act_num):
         clear()
         print()
-        print(f"  {'='*44}")
-        print(f"  Act {act_num}  |  Fight {fight_num}/{total}")
+        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
+        print(f"  {C_BWHITE}Act {act_num}  |  Fight {fight_num}/{total}{C_RESET}")
         self.show_enemy_status(enemy)
         abilities = describe_abilities(enemy)
         for a in abilities:
-            print(f"    {a}")
-        print(f"  {'='*44}")
+            print(f"    {C_YELLOW}{a}{C_RESET}")
+        print(f"  {C_BWHITE}{'='*44}{C_RESET}")
         self.show_status()
 
         hand_num = 0
@@ -667,7 +794,7 @@ class Game:
             # Poison (every hand)
             if enemy.poison_per_hand and enemy.alive and self.player.alive:
                 self.player.take_damage(enemy.poison_per_hand)
-                print(f"  Poison! -{enemy.poison_per_hand} HP ({self.player.hp}/{self.player.max_hp})")
+                print(f"  {C_RED}Poison! -{enemy.poison_per_hand} HP{C_RESET} ({self.player.hp}/{self.player.max_hp})")
 
             # Nine lives
             if not enemy.alive and enemy.nine_lives_chance > 0:
@@ -675,7 +802,7 @@ class Game:
                     enemy.hp = 1
                     enemy.nine_lives_chance = 0.0
                     enemy._nine_lives_spent = True
-                    print(f"  NINE LIVES! {enemy_display_name(enemy)} clings on with 1 HP!")
+                    print(f"  {C_YELLOW}NINE LIVES!{C_RESET} {enemy_display_name(enemy)} clings on with 1 HP!")
 
             # Rage escalation
             if enemy.rage_per_hand and enemy.alive:
@@ -697,7 +824,7 @@ class Game:
     # --- Post-fight reward ---
 
     def post_fight_reward(self, enemy):
-        print(f"\n  --- REWARD ---")
+        print(f"\n  {C_BYELLOW}--- REWARD ---{C_RESET}")
 
         # Build options mapped to arrow directions
         arrows = ["left", "right", "down", "up"]
@@ -764,7 +891,7 @@ class Game:
         elif action == "heal":
             old_hp = self.player.hp
             self.player.heal(heal_amount)
-            print(f"  Healed {self.player.hp - old_hp} HP ({old_hp} -> {self.player.hp})")
+            print(f"  {C_GREEN}Healed {self.player.hp - old_hp} HP{C_RESET} ({old_hp} -> {self.player.hp})")
         elif action == "capture" and can_capture and template:
             if random.random() < self.config.companion.capture_chance:
                 act_key = template.get("activation", "always")
@@ -778,14 +905,14 @@ class Game:
                 )
                 self.player.companions.append(comp)
                 desc = activation_desc(act_key)
-                print(f"  {comp.name} joins you! (activates with {desc})")
+                print(f"  {C_CYAN}{comp.name} joins you!{C_RESET} (activates with {desc})")
             else:
-                print(f"  {template['name']} escaped!")
+                print(f"  {C_RED}{template['name']} escaped!{C_RESET}")
 
         # Level-up notifications
         for c in self.player.companions:
             if c.xp == 0 and c.level > 1:
-                print(f"  {c.name} reached level {c.level}!")
+                print(f"  {C_CYAN}{c.name} reached level {c.level}!{C_RESET}")
         pause()
 
     def _card_removal_ui(self):
@@ -797,15 +924,14 @@ class Game:
         print(f"\n  Deck: {self.deck.template_size} cards ({total_removed} removed)")
 
         # Only show ranks where a copy has been removed (partial sets)
-        rank_order = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
-        modified = [(r, counts.get(r, 0)) for r in rank_order if counts.get(r, 0) < 4]
-        removed_ranks = [r for r in rank_order if counts.get(r, 0) == 0]
+        modified = [(r, counts.get(r, 0)) for r in RANKS if counts.get(r, 0) < 4]
+        removed_ranks = [r for r in RANKS if counts.get(r, 0) == 0]
 
         if modified:
             parts = [f"{r}:{ct}" for r, ct in modified]
             print(f"  Thinned: {', '.join(parts)}")
         if removed_ranks:
-            print(f"  Gone: {', '.join(removed_ranks)}")
+            print(f"  {C_DIM}Gone: {', '.join(removed_ranks)}{C_RESET}")
 
         # Show removable ranks
         print(f"  Remove: {' '.join(removable)}")
@@ -907,8 +1033,8 @@ class Game:
         self.player.heal(heal)
         clear()
         print()
-        print(f"  --- Rest before Act {act_num} ---")
-        print(f"  Healed {self.player.hp - old_hp} HP  ({old_hp} -> {self.player.hp})")
+        print(f"  {C_BWHITE}--- Rest before Act {act_num} ---{C_RESET}")
+        print(f"  {C_GREEN}Healed {self.player.hp - old_hp} HP{C_RESET}  ({old_hp} -> {self.player.hp})")
         self.show_status()
         pause()
 
@@ -917,9 +1043,9 @@ class Game:
     def run(self):
         clear()
         print()
-        print("  " + "=" * 40)
-        print("        BLACKJACK ROGUELITE")
-        print("  " + "=" * 40)
+        print(f"  {C_BWHITE}" + "=" * 40 + f"{C_RESET}")
+        print(f"  {C_BWHITE}      BLACKJACK ROGUELITE{C_RESET}")
+        print(f"  {C_BWHITE}" + "=" * 40 + f"{C_RESET}")
         print()
         print("  Beat enemies at blackjack to deal damage.")
         print("  Get closer to 21 than your enemy.")
@@ -947,10 +1073,10 @@ class Game:
 
             if not self.player.alive:
                 print()
-                print("  " + "=" * 40)
-                print("        DEFEAT")
-                print("  " + "=" * 40)
-                print(f"\n  Fell in fight {i + 1} of {len(encounters)}.")
+                print(f"  {C_BRED}" + "=" * 40 + f"{C_RESET}")
+                print(f"  {C_BRED}      DEFEAT{C_RESET}")
+                print(f"  {C_BRED}" + "=" * 40 + f"{C_RESET}")
+                print(f"\n  {C_DIM}Fell in fight {i + 1} of {len(encounters)}.{C_RESET}")
                 print(f"  Killed by: {enemy_display_name(enemy)}")
                 self.show_final()
                 return
@@ -960,11 +1086,12 @@ class Game:
 
         clear()
         print()
-        print("  " + "=" * 40)
-        print("        VICTORY!")
-        print("  " + "=" * 40)
-        print(f"\n  Survived all {len(encounters)} encounters!")
-        print(f"  Final HP: {self.player.hp}/{self.player.max_hp}")
+        print(f"  {C_BGREEN}" + "=" * 40 + f"{C_RESET}")
+        print(f"  {C_BGREEN}      VICTORY!{C_RESET}")
+        print(f"  {C_BGREEN}" + "=" * 40 + f"{C_RESET}")
+        print(f"\n  {C_GREEN}Survived all {len(encounters)} encounters!{C_RESET}")
+        color = hp_color(self.player.hp, self.player.max_hp)
+        print(f"  Final HP: {color}{self.player.hp}/{self.player.max_hp}{C_RESET}")
         self.show_final()
 
     def show_final(self):
@@ -972,8 +1099,9 @@ class Game:
             print(f"\n  Companions:")
             for c in self.player.companions:
                 effect = describe_companion_effect(c.effect_type)
-                desc = activation_desc(c.activation)
-                print(f"    {c.name} Lv{c.level} -- {effect}: {c.effect_value:.1f} ({desc})")
+                hint_c = colorize_hint(c.activation)
+                suffix = f" [{hint_c}]" if hint_c else ""
+                print(f"    {C_CYAN}{c.name}{C_RESET} Lv{c.level} -- {effect}: {c.effect_value:.1f}{suffix}")
         print()
 
 
