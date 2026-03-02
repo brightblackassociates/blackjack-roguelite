@@ -513,22 +513,26 @@ class Game:
         e_nat = is_natural_21(enemy_cards)
 
         if p_nat or e_nat:
-            print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
+            print(f"  You:   {show_card(player_cards[0])}", end="")
+            sys.stdout.flush()
+            beat(0.15)
+            print(f"  {show_card(player_cards[1])}  = {hand_value(player_cards)}")
+            beat(0.1)
             print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}")
-            beat(0.4)
+            beat(0.5)
             if p_nat and e_nat:
                 print(f"  {C_YELLOW}Both natural 21! Push.{C_RESET}")
                 self._apply_siphon(player_cards)
                 return
             if p_nat:
                 print(f"  {C_BGREEN}NATURAL 21!{C_RESET}")
-                beat(0.3)
+                beat(0.5)
                 dmg = self._calc_win_damage(21, hand_value(enemy_cards), is_natural=True, player_cards=player_cards)
                 self.hurt_enemy(enemy, dmg)
                 self._apply_siphon(player_cards)
                 return
             print(f"  {C_BRED}Enemy natural 21!{C_RESET}")
-            beat(0.3)
+            beat(0.4)
             dmg = self._calc_loss_damage(21, hand_value(player_cards), is_natural=True,
                                          player_cards=player_cards, bonus_damage=enemy.bonus_damage)
             self.hurt_player(dmg)
@@ -537,8 +541,12 @@ class Game:
             self._apply_siphon(player_cards)
             return
 
-        # --- Show starting hands ---
-        print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
+        # --- Show starting hands (progressive deal) ---
+        print(f"  You:   {show_card(player_cards[0])}", end="")
+        sys.stdout.flush()
+        beat(0.15)
+        print(f"  {show_card(player_cards[1])}  = {hand_value(player_cards)}")
+        beat(0.1)
         if has_peek:
             print(f"  Enemy: {show_hand(enemy_cards)}  = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
         else:
@@ -560,7 +568,7 @@ class Game:
                     print(f"  You:   {show_hand(player_cards)}  = {hand_value(player_cards)}")
                     continue
                 player_busted = True
-                beat(0.3)
+                beat(0.4)
                 print(f"  {C_BRED}BUST!{C_RESET} ({p_val})")
                 break
 
@@ -590,15 +598,17 @@ class Game:
 
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO"}
 
+            threshold_str = f"plays to {enemy.hit_threshold}"
+
             if first_decision:
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2193 Fold  \u2191 Info   ({bust_str} | deck: {deck_ct})",
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2193 Fold  \u2191 Info   ({threshold_str} | {bust_str} | deck: {deck_ct})",
                     ["right", "left", "down", "up"],
                     arrow_labels,
                 )
             else:
                 choice = prompt_choice(
-                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info   ({bust_str} | deck: {deck_ct})",
+                    f"{C_GREEN}\u2192 Hit  \u2190 Stand{C_RESET}  \u2191 Info   ({threshold_str} | {bust_str} | deck: {deck_ct})",
                     ["right", "left", "up"],
                     arrow_labels,
                 )
@@ -627,7 +637,7 @@ class Game:
 
         # --- Player busted: lose immediately ---
         if player_busted:
-            beat(0.4)
+            beat(0.5)
             e_val = hand_value(enemy_cards)
             print(f"  Enemy had  {show_hand(enemy_cards)}  -> {e_val}")
             beat(0.3)
@@ -662,32 +672,53 @@ class Game:
         enemy_busted = e_val > 21
 
         if enemy_busted:
-            beat(0.3)
+            beat(0.4)
             print(f"  {C_BGREEN}ENEMY BUSTS!{C_RESET} ({e_val})")
 
         # --- Resolve ---
-        beat(0.4)
+        beat(0.3)
+        won = False
+        lost = False
         if enemy_busted:
-            print(f"  {C_GREEN}You win!{C_RESET} {p_val} vs BUST")
-            beat(0.2)
+            beat(0.3)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
+            won = True
         elif p_val > e_val:
             print(f"  {C_GREEN}You win!{C_RESET} {p_val} vs {e_val}")
-            beat(0.2)
+            beat(0.15)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
+            won = True
         elif e_val > p_val:
             print(f"  {C_RED}You lose.{C_RESET} {p_val} vs {e_val}")
-            beat(0.2)
+            beat(0.15)
             dmg = self._calc_loss_damage(e_val, p_val, player_cards=player_cards,
                                          bonus_damage=enemy.bonus_damage)
             self.hurt_player(dmg)
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
+            lost = True
         else:
             print(f"  {C_YELLOW}Push.{C_RESET} Both {p_val}.")
         self._apply_siphon(player_cards)
+
+        # --- Highlight callouts ---
+        if p_val == 22 and player_busted:
+            beat(0.3)
+            print(f"  {C_DIM}Just one over...{C_RESET}")
+        if len(player_cards) >= 5 and not player_busted:
+            beat(0.2)
+            print(f"  {C_BWHITE}Five cards!{C_RESET}")
+        if won and not enemy_busted and p_val - e_val == 1:
+            beat(0.3)
+            print(f"  {C_GREEN}By a hair!{C_RESET}")
+        if lost and not player_busted and e_val - p_val == 1:
+            beat(0.3)
+            print(f"  {C_RED}So close...{C_RESET}")
+        if won and self.player.hp <= self.player.max_hp * 0.2:
+            beat(0.4)
+            print(f"  {C_BGREEN}Clutch!{C_RESET}")
 
     def _calc_win_damage(self, p_val, e_val, is_natural=False, player_cards=None):
         cfg = self.config.damage
@@ -781,32 +812,45 @@ class Game:
         self.show_status()
 
         hand_num = 0
+        total_dealt = 0
+        total_taken = 0
+        prev_levels = {c.name: c.level for c in self.player.companions}
+
         while self.player.alive and enemy.alive:
             hand_num += 1
+            ehp_before, php_before = enemy.hp, self.player.hp
             result = self.play_hand(enemy, hand_num)
+            total_dealt += max(0, ehp_before - enemy.hp)
+            total_taken += max(0, php_before - self.player.hp)
 
             # Show both HP bars after each hand
             if self.player.alive and enemy.alive:
                 print()
                 self.show_enemy_status(enemy)
                 self.show_status()
+                print(f"  {C_DIM}{'·' * 20}{C_RESET}")
 
             # Poison (every hand)
             if enemy.poison_per_hand and enemy.alive and self.player.alive:
+                beat(0.2)
                 self.player.take_damage(enemy.poison_per_hand)
                 print(f"  {C_RED}Poison! -{enemy.poison_per_hand} HP{C_RESET} ({self.player.hp}/{self.player.max_hp})")
 
             # Nine lives
             if not enemy.alive and enemy.nine_lives_chance > 0:
                 if random.random() < enemy.nine_lives_chance:
+                    beat(0.5)
                     enemy.hp = 1
                     enemy.nine_lives_chance = 0.0
                     enemy._nine_lives_spent = True
                     print(f"  {C_YELLOW}NINE LIVES!{C_RESET} {enemy_display_name(enemy)} clings on with 1 HP!")
+                    beat(0.3)
 
             # Rage escalation
             if enemy.rage_per_hand and enemy.alive:
                 enemy.bonus_damage += enemy.rage_per_hand
+                beat(0.3)
+                print(f"  {C_YELLOW}{enemy_display_name(enemy)} grows stronger! (+{enemy.bonus_damage} dmg){C_RESET}")
 
         # Companion XP (end of fight)
         for c in self.player.companions:
@@ -819,6 +863,15 @@ class Game:
         won = not enemy.alive
         if won:
             print(f"\n  {enemy_display_name(enemy)} defeated!")
+            print(f"  {C_DIM}{hand_num} hands | {total_dealt} dealt | {total_taken} taken{C_RESET}")
+
+        # Companion level-up and XP display
+        for c in self.player.companions:
+            if c.level > prev_levels.get(c.name, 0):
+                print(f"  {C_CYAN}{c.name} reached level {c.level}!{C_RESET}")
+            elif c.level < self.config.companion.max_level:
+                print(f"  {C_DIM}{c.name} {c.xp}/{self.config.companion.xp_per_level} XP{C_RESET}")
+
         return won
 
     # --- Post-fight reward ---
@@ -909,10 +962,6 @@ class Game:
             else:
                 print(f"  {C_RED}{template['name']} escaped!{C_RESET}")
 
-        # Level-up notifications
-        for c in self.player.companions:
-            if c.xp == 0 and c.level > 1:
-                print(f"  {C_CYAN}{c.name} reached level {c.level}!{C_RESET}")
         pause()
 
     def _card_removal_ui(self):
