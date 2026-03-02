@@ -35,7 +35,7 @@ class DamageConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class PlayerConfig:
-    starting_hp: int = 80
+    starting_hp: int = 95
     max_companion_slots: int = 3
 
 
@@ -44,7 +44,7 @@ class PlayerConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class CompanionConfig:
-    capture_chance: float = 0.40       # Chance a capture opportunity appears
+    capture_chance: float = 0.60       # Chance capture succeeds when attempted
     xp_per_fight: int = 10            # XP gained per fight participated in
     xp_per_level: int = 30            # XP needed to level up
     max_level: int = 5
@@ -59,7 +59,7 @@ class RunConfig:
     fights_per_act: int = 3
     elites_per_act: int = 1
     # Boss is always the final fight of each act
-    heal_between_acts_pct: float = 0.30  # Heal 30% max HP between acts
+    heal_between_acts_pct: float = 0.35  # Heal 35% max HP between acts
     act_hp_multipliers: list = field(default_factory=lambda: [1.0, 1.3, 1.6])
 
 
@@ -258,30 +258,35 @@ COMPANION_TEMPLATES = {
     "fire_imp": {
         "name": "Fire Imp",
         "effect_type": "damage_multiplier",
-        "base_value": 1.35,
+        "activation": "two_red",       # needs two red cards (♥♦) in hand
+        "base_value": 1.40,
         "per_level": 0.05,
     },
     "shield_turtle": {
         "name": "Shield Turtle",
         "effect_type": "damage_reduction_pct",
-        "base_value": 0.25,
+        "activation": "two_black",     # needs two black cards (♣♠) in hand
+        "base_value": 0.30,
         "per_level": 0.03,
     },
     "lucky_cat": {
         "name": "Lucky Cat",
         "effect_type": "natural_21_multiplier",
+        "activation": "natural_21",    # only on natural blackjack
         "base_value": 2.5,
         "per_level": 0.25,
     },
     "shadow_thief": {
         "name": "Shadow Thief",
         "effect_type": "peek_enemy",
+        "activation": "always",
         "base_value": 1,
         "per_level": 0,
     },
     "goblin_shaman": {
         "name": "Goblin Shaman",
         "effect_type": "unbust_chance",
+        "activation": "on_bust",
         "base_value": 0.30,
         "per_level": 0.05,
     },

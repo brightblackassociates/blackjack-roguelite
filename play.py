@@ -12,7 +12,7 @@ import termios
 
 from config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
 from engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
-                     RARITY_BUFFS, RARITY_WEIGHTS)
+                     RARITY_BUFFS, RARITY_WEIGHTS, check_activation)
 
 
 # --- ANSI color for enemy rarity ---
@@ -39,6 +39,27 @@ def enemy_display_name(enemy):
         return enemy.name
     label = f"{enemy.name} ({enemy.rarity.capitalize()})"
     return colorize(label, enemy.rarity)
+
+
+ACTIVATION_INFO = {
+    "two_red":    {"hint": "\u2665\u2666", "desc": "two red cards (\u2665\u2666) in hand"},
+    "two_black":  {"hint": "\u2663\u2660", "desc": "two black cards (\u2663\u2660) in hand"},
+    "natural_21": {"hint": "BJ",  "desc": "natural 21"},
+    "on_bust":    {"hint": "",    "desc": "when you bust"},
+    "always":     {"hint": "",    "desc": "always active"},
+}
+
+
+def activation_hint(activation):
+    """Short hint like '♥♦' for status bar display."""
+    info = ACTIVATION_INFO.get(activation, {})
+    return info.get("hint", "")
+
+
+def activation_desc(activation):
+    """Full description like 'two red cards (♥♦) in hand'."""
+    info = ACTIVATION_INFO.get(activation, {})
+    return info.get("desc", "")
 
 
 SUIT_SYM = {"H": "\u2665", "D": "\u2666", "C": "\u2663", "S": "\u2660"}
@@ -258,8 +279,12 @@ class Game:
         bar = hp_bar(self.player.hp, self.player.max_hp)
         parts = [f"HP {bar} {self.player.hp}/{self.player.max_hp}"]
         if self.player.companions:
-            comps = ", ".join(f"{c.name} Lv{c.level}" for c in self.player.companions)
-            parts.append(comps)
+            comp_strs = []
+            for c in self.player.companions:
+                hint = activation_hint(c.activation)
+                suffix = f" [{hint}]" if hint else ""
+                comp_strs.append(f"{c.name} Lv{c.level}{suffix}")
+            parts.append(", ".join(comp_strs))
         print(f"  {' | '.join(parts)}")
 
     # --- Damage application ---
@@ -360,7 +385,7 @@ class Game:
     def play_hand(self, enemy, hand_num):
         player_cards = [self.deck.draw(), self.deck.draw()]
         enemy_cards = [self.deck.draw(), self.deck.draw()]
-        has_peek = self.player.get_companion_effect("peek_enemy") is not None
+        has_peek = self.player.get_companion_effect("peek_enemy", player_cards) is not None
 
         print(f"\n  -- Hand {hand_num} --")
 
@@ -409,7 +434,7 @@ class Game:
             p_val = hand_value(player_cards)
 
             if p_val > 21:
-                unbust = self.player.get_companion_effect("unbust_chance")
+                unbust = self.player.get_companion_effect("unbust_chance", player_cards)
                 if unbust and random.random() < unbust:
                     removed = player_cards.pop()
                     print(f"  Goblin Shaman saves you! Tossed {show_card(removed)}")
@@ -547,7 +572,7 @@ class Game:
             print(f"  {p_val} - {cfg.damage_subtract} = {base:.0f}")
         dmg = base
         if is_natural:
-            cat_mult = self.player.get_companion_effect("natural_21_multiplier")
+            cat_mult = self.player.get_companion_effect("natural_21_multiplier", player_cards)
             if cat_mult:
                 dmg *= cat_mult
                 print(f"  x{cat_mult:.1f} Lucky Cat -> {dmg:.0f}")
@@ -559,10 +584,10 @@ class Game:
             if margin >= cfg.margin_bonus_threshold:
                 dmg *= cfg.margin_bonus_multiplier
                 print(f"  x{cfg.margin_bonus_multiplier:.1f} margin ({margin}pt) -> {dmg:.0f}")
-        imp_mult = self.player.get_companion_effect("damage_multiplier")
+        imp_mult = self.player.get_companion_effect("damage_multiplier", player_cards)
         if imp_mult:
             dmg *= imp_mult
-            print(f"  x{imp_mult:.2f} Fire Imp -> {dmg:.0f}")
+            print(f"  x{imp_mult:.2f} Fire Imp [\u2665\u2666] -> {dmg:.0f}")
         if player_cards:
             ench = self._count_enchantments(player_cards)
             if ench["fury"] > 0:
@@ -587,11 +612,11 @@ class Game:
         if is_natural:
             dmg *= cfg.natural_21_multiplier
             print(f"  x{cfg.natural_21_multiplier:.1f} natural -> {dmg:.0f}")
-        reduction_pct = self.player.get_companion_effect("damage_reduction_pct")
+        reduction_pct = self.player.get_companion_effect("damage_reduction_pct", player_cards)
         if reduction_pct:
             reduced = dmg * reduction_pct
             dmg = max(0, dmg - reduced)
-            print(f"  -{reduction_pct*100:.0f}% Shield Turtle -> {dmg:.0f}")
+            print(f"  -{reduction_pct*100:.0f}% Shield Turtle [\u2663\u2660] -> {dmg:.0f}")
         if player_cards:
             ench = self._count_enchantments(player_cards)
             if ench["ward"] > 0:
@@ -704,15 +729,15 @@ class Game:
         if enchantable:
             options.append(("Enchant a card", "enchant"))
 
-        # Option: Capture companion
+        # Option: Capture companion (always shown, but can fail)
         can_capture = False
         template = None
         if enemy.companion_type and enemy.tier == "normal":
-            if random.random() < self.config.companion.capture_chance:
-                template = COMPANION_TEMPLATES.get(enemy.companion_type)
-                if template and self.player.can_capture():
-                    can_capture = True
-                    options.append((f"Capture {template['name']}", "capture"))
+            template = COMPANION_TEMPLATES.get(enemy.companion_type)
+            if template and self.player.can_capture():
+                can_capture = True
+                pct = int(self.config.companion.capture_chance * 100)
+                options.append((f"Capture {template['name']} ({pct}% chance)", "capture"))
 
         if not options:
             print("  No rewards available.")
@@ -741,15 +766,21 @@ class Game:
             self.player.heal(heal_amount)
             print(f"  Healed {self.player.hp - old_hp} HP ({old_hp} -> {self.player.hp})")
         elif action == "capture" and can_capture and template:
-            comp = Companion(
-                name=template["name"],
-                companion_type=enemy.companion_type,
-                effect_type=template["effect_type"],
-                base_value=template["base_value"],
-                per_level=template["per_level"],
-            )
-            self.player.companions.append(comp)
-            print(f"  {comp.name} joins you!")
+            if random.random() < self.config.companion.capture_chance:
+                act_key = template.get("activation", "always")
+                comp = Companion(
+                    name=template["name"],
+                    companion_type=enemy.companion_type,
+                    effect_type=template["effect_type"],
+                    base_value=template["base_value"],
+                    per_level=template["per_level"],
+                    activation=act_key,
+                )
+                self.player.companions.append(comp)
+                desc = activation_desc(act_key)
+                print(f"  {comp.name} joins you! (activates with {desc})")
+            else:
+                print(f"  {template['name']} escaped!")
 
         # Level-up notifications
         for c in self.player.companions:
@@ -941,7 +972,8 @@ class Game:
             print(f"\n  Companions:")
             for c in self.player.companions:
                 effect = describe_companion_effect(c.effect_type)
-                print(f"    {c.name} Lv{c.level} -- {effect}: {c.effect_value:.1f}")
+                desc = activation_desc(c.activation)
+                print(f"    {c.name} Lv{c.level} -- {effect}: {c.effect_value:.1f} ({desc})")
         print()
 
 

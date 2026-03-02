@@ -147,6 +147,7 @@ class Companion:
     effect_type: str
     base_value: float
     per_level: float
+    activation: str = "always"
     level: int = 1
     xp: int = 0
 
@@ -159,6 +160,17 @@ class Companion:
         while self.xp >= xp_per_level and self.level < max_level:
             self.xp -= xp_per_level
             self.level += 1
+
+
+def check_activation(cards: List[Card], activation: str) -> bool:
+    """Check if a hand meets a companion's activation condition."""
+    if activation in ("always", "natural_21", "on_bust"):
+        return True  # contextual -- checked by the caller, not by card composition
+    if activation == "two_red":
+        return sum(1 for c in cards if c.suit in ("H", "D")) >= 2
+    if activation == "two_black":
+        return sum(1 for c in cards if c.suit in ("C", "S")) >= 2
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +235,13 @@ class Player:
     def take_damage(self, amount: int):
         self.hp = max(0, self.hp - amount)
 
-    def get_companion_effect(self, effect_type: str) -> Optional[float]:
-        """Return effect value for first companion with this effect, or None."""
+    def get_companion_effect(self, effect_type: str, cards: List[Card] = None) -> Optional[float]:
+        """Return effect value for first companion with this effect, or None.
+        If cards are provided, checks the companion's activation condition."""
         for c in self.companions:
             if c.effect_type == effect_type:
+                if cards is not None and not check_activation(cards, c.activation):
+                    return None
                 return c.effect_value
         return None
 
@@ -347,14 +362,16 @@ class CombatEngine:
                     decision_points, companion_effects, highlights,
                 )
             if p_natural:
-                dmg = self._damage_dealt(p_val, e_val, True, player, companion_effects)
+                dmg = self._damage_dealt(p_val, e_val, True, player, companion_effects,
+                                         player_cards)
                 return HandResult(
                     player_cards, enemy_cards, p_val, e_val,
                     False, False, True, False, dmg, 0, "win",
                     decision_points, companion_effects, highlights,
                 )
             # Enemy natural
-            dmg = self._damage_taken(e_val, p_val, True, player, companion_effects)
+            dmg = self._damage_taken(e_val, p_val, True, player, companion_effects,
+                                     player_cards)
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 False, False, False, True, 0, dmg, "lose",
@@ -362,7 +379,7 @@ class CombatEngine:
             )
 
         # --- What the player can see ---
-        peek = player.get_companion_effect("peek_enemy")
+        peek = player.get_companion_effect("peek_enemy", player_cards)
         if peek:
             visible_enemy = hand_value(enemy_cards)
         else:
@@ -376,7 +393,7 @@ class CombatEngine:
             p_val = hand_value(player_cards)
             if p_val > 21:
                 # Try unbust companion
-                unbust = player.get_companion_effect("unbust_chance")
+                unbust = player.get_companion_effect("unbust_chance", player_cards)
                 if unbust and random.random() < unbust:
                     player_cards.pop()
                     companion_effects.append("Goblin Shaman: unbusted!")
@@ -428,7 +445,8 @@ class CombatEngine:
 
         # --- Resolve ---
         if player_busted:
-            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects)
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects,
+                                     player_cards)
             dmg *= self.config.damage.bust_penalty_multiplier
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
@@ -437,7 +455,8 @@ class CombatEngine:
             )
 
         if enemy_busted:
-            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects)
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects,
+                                     player_cards)
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 False, True, False, False, dmg, 0, "win",
@@ -446,10 +465,12 @@ class CombatEngine:
 
         # Neither busted: compare values
         if p_val > e_val:
-            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects)
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects,
+                                     player_cards)
             outcome = "win"
         elif e_val > p_val:
-            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects)
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects,
+                                     player_cards)
             outcome = "lose"
         else:
             outcome = "push"
@@ -489,12 +510,13 @@ class CombatEngine:
             return float(max(winner_val - loser_val, cfg.damage_floor))
         return float(max(winner_val - cfg.damage_subtract, 1))
 
-    def _damage_dealt(self, p_val, e_val, is_natural, player, effects_log):
+    def _damage_dealt(self, p_val, e_val, is_natural, player, effects_log,
+                      player_cards=None):
         damage = self._base_damage(p_val, e_val)
 
         if is_natural:
             # Lucky Cat: standalone multiplier on natural 21
-            cat_mult = player.get_companion_effect("natural_21_multiplier")
+            cat_mult = player.get_companion_effect("natural_21_multiplier", player_cards)
             if cat_mult:
                 damage *= cat_mult
                 effects_log.append(f"Lucky Cat: natural 21 ({cat_mult:.1f}x)")
@@ -505,22 +527,23 @@ class CombatEngine:
         if not is_natural and margin >= self.config.damage.margin_bonus_threshold:
             damage *= self.config.damage.margin_bonus_multiplier
 
-        # Fire Imp: multiplicative damage on wins
-        imp_mult = player.get_companion_effect("damage_multiplier")
+        # Fire Imp: multiplicative damage on wins (needs activation condition)
+        imp_mult = player.get_companion_effect("damage_multiplier", player_cards)
         if imp_mult:
             damage *= imp_mult
             effects_log.append(f"Fire Imp: {imp_mult:.2f}x damage")
 
         return damage
 
-    def _damage_taken(self, e_val, p_val, is_natural, player, effects_log):
+    def _damage_taken(self, e_val, p_val, is_natural, player, effects_log,
+                      player_cards=None):
         damage = self._base_damage(e_val, p_val)
 
         if is_natural:
             damage *= self.config.damage.natural_21_multiplier
 
-        # Shield Turtle: percentage damage reduction
-        reduction_pct = player.get_companion_effect("damage_reduction_pct")
+        # Shield Turtle: percentage damage reduction (needs activation condition)
+        reduction_pct = player.get_companion_effect("damage_reduction_pct", player_cards)
         if reduction_pct:
             reduced = damage * reduction_pct
             damage = max(0, damage - reduced)
@@ -761,12 +784,9 @@ class RunEngine:
                 )
                 can_heal = player.hp < player.max_hp
 
-                # Capture opportunity (replaces old auto-capture)
-                can_capture = False
-                if (enemy.companion_type and enemy.tier == "normal"
-                        and random.random() < self.config.companion.capture_chance
-                        and player.can_capture()):
-                    can_capture = True
+                # Capture opportunity -- always offered, but can fail on attempt
+                can_capture = (enemy.companion_type and enemy.tier == "normal"
+                               and player.can_capture())
 
                 # Enchant opportunity
                 can_enchant = bool(self.combat.deck.enchantable_cards(
@@ -814,17 +834,20 @@ class RunEngine:
                 elif choice == "heal":
                     player.heal(heal_amount)
                 elif choice == "capture" and can_capture:
-                    template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
-                    if template:
-                        comp = Companion(
-                            name=template["name"],
-                            companion_type=enemy.companion_type,
-                            effect_type=template["effect_type"],
-                            base_value=template["base_value"],
-                            per_level=template["per_level"],
-                        )
-                        player.companions.append(comp)
-                        result.companion_captured = enemy.companion_type
+                    # Roll for capture success
+                    if random.random() < self.config.companion.capture_chance:
+                        template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
+                        if template:
+                            comp = Companion(
+                                name=template["name"],
+                                companion_type=enemy.companion_type,
+                                effect_type=template["effect_type"],
+                                base_value=template["base_value"],
+                                per_level=template["per_level"],
+                                activation=template.get("activation", "always"),
+                            )
+                            player.companions.append(comp)
+                            result.companion_captured = enemy.companion_type
 
                 result.reward_chosen = choice
                 rewards_chosen.append(choice)
