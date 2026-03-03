@@ -227,6 +227,41 @@ def describe_companion_effect(effect_type, short=False):
     return entry[0] if short else entry[1]
 
 
+def format_hand_summary(result):
+    """One-line dim summary of a resolved hand. Returns string or None."""
+    if result is None or not isinstance(result, dict):
+        return None
+    action = result.get("action", "")
+    if action == "split":
+        return None
+    p_val = result.get("p_val", 0)
+    e_val = result.get("e_val", 0)
+    dmg_dealt = result.get("dmg_dealt", 0)
+    dmg_taken = result.get("dmg_taken", 0)
+    won = result.get("won", False)
+    lost = result.get("lost", False)
+    enemy_busted = result.get("enemy_busted", False)
+
+    if action == "folded":
+        return f"{C_DIM}Folded. Took {dmg_taken} chip damage.{C_RESET}"
+    if action == "natural_push":
+        return f"{C_DIM}Both natural 21. Push.{C_RESET}"
+    if action == "natural":
+        return f"{C_DIM}Natural 21! Dealt {dmg_dealt} dmg.{C_RESET}"
+    if action == "natural_loss":
+        return f"{C_DIM}Enemy natural 21. Took {dmg_taken} dmg.{C_RESET}"
+    if action == "busted":
+        return f"{C_DIM}Busted ({p_val}), enemy had {e_val}. Took {dmg_taken} dmg.{C_RESET}"
+    if won:
+        if enemy_busted:
+            return f"{C_DIM}Stood on {p_val}, enemy busted ({e_val}). Dealt {dmg_dealt} dmg.{C_RESET}"
+        return f"{C_DIM}Stood on {p_val} vs {e_val}. Dealt {dmg_dealt} dmg.{C_RESET}"
+    if lost:
+        return f"{C_DIM}Stood on {p_val} vs {e_val}. Took {dmg_taken} dmg.{C_RESET}"
+    # Push
+    return f"{C_DIM}Push at {p_val}.{C_RESET}"
+
+
 # -----------------------------------------------------------------------
 # Game
 # -----------------------------------------------------------------------
@@ -333,6 +368,105 @@ class Game:
         if cfg.model == "differential":
             return max(winner_val - loser_val, cfg.damage_floor)
         return max(winner_val - cfg.damage_subtract, 1)
+
+    # --- Decision HUD helpers ---
+
+    def _estimate_damage(self, p_val, player_cards, enemy):
+        """Approximate win/loss damage for the HUD preview. Returns (est_win, est_loss)."""
+        cfg = self.config.damage
+        e_est = enemy.hit_threshold  # best available estimate of enemy final value
+
+        # Win estimate
+        if cfg.model == "differential":
+            win_base = float(max(p_val - e_est, cfg.damage_floor))
+        else:
+            win_base = float(max(p_val - cfg.damage_subtract, 1))
+        win_dmg = win_base
+        imp_mult = self.player.get_companion_effect("damage_multiplier", player_cards)
+        if imp_mult:
+            win_dmg *= imp_mult
+        # Shell absorption
+        if enemy.damage_absorption > 0:
+            win_dmg = max(0, win_dmg - enemy.damage_absorption)
+
+        # Loss estimate
+        if cfg.model == "differential":
+            loss_base = float(max(e_est - p_val, cfg.damage_floor))
+        else:
+            loss_base = float(max(e_est - cfg.damage_subtract, 1))
+        loss_dmg = loss_base
+        reduction_pct = self.player.get_companion_effect("damage_reduction_pct", player_cards)
+        if reduction_pct:
+            loss_dmg = max(0, loss_dmg - loss_dmg * reduction_pct)
+        if enemy.bonus_damage > 0:
+            loss_dmg += enemy.bonus_damage
+
+        return int(win_dmg), int(loss_dmg)
+
+    def _companion_status_brief(self, player_cards):
+        """Brief companion activation status for card-composition companions only."""
+        parts = []
+        for c in self.player.companions:
+            if c.activation not in ("two_red", "two_black"):
+                continue
+            active = check_activation(player_cards, c.activation)
+            hint = colorize_hint(c.activation)
+            if active:
+                parts.append(f"{hint} {C_GREEN}\u2713{C_RESET} {c.name}")
+            else:
+                raw_hint = activation_hint(c.activation)
+                parts.append(f"{C_DIM}{raw_hint} {c.name}{C_RESET}")
+        return "  ".join(parts)
+
+    def _enemy_threat_brief(self, enemy):
+        """Compact enemy threat string for the HUD."""
+        parts = [f"{enemy.hp}/{enemy.max_hp} HP"]
+        if enemy.bonus_damage > 0:
+            if enemy.rage_per_hand:
+                parts.append(f"rage +{enemy.bonus_damage}")
+            else:
+                parts.append(f"+{enemy.bonus_damage} dmg")
+        if enemy.poison_per_hand:
+            parts.append(f"poison {enemy.poison_per_hand}/hand")
+        if enemy.drain:
+            parts.append("drain")
+        if enemy.damage_absorption:
+            parts.append(f"shell {enemy.damage_absorption}")
+        if enemy.reckless_extra:
+            parts.append(f"reckless {enemy.reckless_extra}")
+        if enemy.forced_extra_hits:
+            parts.append(f"inferno {enemy.forced_extra_hits}")
+        return "  ".join(parts)
+
+    def _print_decision_hud(self, p_val, player_cards, enemy, bust_pct, deck_ct):
+        """Print 2-line decision HUD with damage estimates, risk, enemy threat, companions."""
+        est_win, est_loss = self._estimate_damage(p_val, player_cards, enemy)
+
+        # Risk label
+        if bust_pct < 20:
+            risk = f"{C_GREEN}SAFE{C_RESET}"
+        elif bust_pct <= 70:
+            risk = f"{C_YELLOW}RISKY{C_RESET}"
+        else:
+            risk = f"{C_RED}DANGER{C_RESET}"
+
+        # Bust color
+        if bust_pct > 70:
+            bust_color = C_RED
+        elif bust_pct >= 20:
+            bust_color = C_YELLOW
+        else:
+            bust_color = C_GREEN
+
+        line1 = f"  Win ~{est_win}  Lose ~{est_loss}   {bust_color}bust: {bust_pct:.0f}%{C_RESET} {risk}  deck: {deck_ct}"
+        print(line1)
+
+        threat = self._enemy_threat_brief(enemy)
+        companion = self._companion_status_brief(player_cards)
+        line2_parts = [f"  {C_DIM}{threat}{C_RESET}"]
+        if companion:
+            line2_parts.append(f"    {companion}")
+        print("".join(line2_parts))
 
     # --- Encounter generation ---
 
@@ -587,23 +721,31 @@ class Game:
             if p_nat and e_nat:
                 print(f"  {C_YELLOW}Both natural 21! Push.{C_RESET}")
                 self._apply_siphon(player_cards)
-                return
+                return {"action": "natural_push", "p_val": 21, "e_val": 21,
+                        "won": False, "lost": False, "dmg_dealt": 0, "dmg_taken": 0,
+                        "enemy_busted": False}
             if p_nat:
                 print(f"  {C_BGREEN}NATURAL 21!{C_RESET}")
                 beat(0.5)
+                ehp_b = enemy.hp
                 dmg = self._calc_win_damage(21, hand_value(enemy_cards), is_natural=True, player_cards=player_cards)
                 self.hurt_enemy(enemy, dmg)
                 self._apply_siphon(player_cards)
-                return
+                return {"action": "natural", "p_val": 21, "e_val": hand_value(enemy_cards),
+                        "won": True, "lost": False, "dmg_dealt": max(0, ehp_b - enemy.hp),
+                        "dmg_taken": 0, "enemy_busted": False}
             print(f"  {C_BRED}Enemy natural 21!{C_RESET}")
             beat(0.4)
+            php_b = self.player.hp
             dmg = self._calc_loss_damage(21, hand_value(player_cards), is_natural=True,
                                          player_cards=player_cards, bonus_damage=enemy.bonus_damage)
             self.hurt_player(dmg)
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
             self._apply_siphon(player_cards)
-            return
+            return {"action": "natural_loss", "p_val": hand_value(player_cards), "e_val": 21,
+                    "won": False, "lost": True, "dmg_dealt": 0,
+                    "dmg_taken": max(0, php_b - self.player.hp), "enemy_busted": False}
 
         # --- Show starting hands (progressive deal) ---
         print(f"  You    {show_card(player_cards[0])}", end="")
@@ -622,32 +764,31 @@ class Game:
                      and player_cards[0].rank == player_cards[1].rank)
 
         hit_from_split_prompt = False
+        split_need_reprint = False
         while can_split:
             # Offer split as first-decision option
             bust_pct = self.deck.bust_probability(player_cards) * 100
             deck_ct = len(self.deck.cards)
-            if bust_pct > 70:
-                bust_color = C_RED
-            elif bust_pct >= 20:
-                bust_color = C_YELLOW
-            else:
-                bust_color = C_GREEN
-            bust_str = f"{bust_color}bust: {bust_pct:.0f}%{C_RESET}"
 
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES", "s": "SPLIT"}
 
+            if split_need_reprint:
+                print()
+                print(f"  You    {show_hand(player_cards)}   = {hand_value(player_cards)}")
+                threshold_str = f"stands at {enemy.hit_threshold}"
+                if has_peek:
+                    print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+                else:
+                    print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+            split_need_reprint = True
+
+            p_val = hand_value(player_cards)
             print()
-            print(f"  You    {show_hand(player_cards)}   = {hand_value(player_cards)}")
-            threshold_str = f"stands at {enemy.hit_threshold}"
-            if has_peek:
-                print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
-            else:
-                print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+            self._print_decision_hud(p_val, player_cards, enemy, bust_pct, deck_ct)
 
             has_folds = self.player.folds > 0
-            stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
 
-            print(f"\n  \u2192 Hit   \u2190 Stand                    {stats_str}")
+            print(f"\n  \u2192 Hit   \u2190 Stand")
             valid_keys = ["right", "left", "up", "r", "s"]
             if has_folds:
                 fold_str = f"\u2193 Fold ({self.player.folds})"
@@ -675,7 +816,9 @@ class Game:
                 fold_dmg = self.config.damage.fold_damage
                 print(f"  Folded. Take {fold_dmg} chip damage. ({self.player.folds} folds left)")
                 self.hurt_player(fold_dmg)
-                return "fold"
+                return {"action": "folded", "p_val": hand_value(player_cards),
+                        "e_val": hand_value(enemy_cards), "won": False, "lost": True,
+                        "dmg_dealt": 0, "dmg_taken": fold_dmg, "enemy_busted": False}
             elif choice == "s":
                 # --- Split flow ---
                 card_a, card_b = player_cards
@@ -753,7 +896,9 @@ class Game:
                 if (won_a or won_b) and self.player.hp <= self.player.max_hp * 0.2:
                     beat(0.4)
                     print(f"  {C_BGREEN}Clutch!{C_RESET}")
-                return
+                return {"action": "split", "p_val": 0, "e_val": e_val,
+                        "won": won_a or won_b, "lost": lost_a or lost_b,
+                        "dmg_dealt": 0, "dmg_taken": 0, "enemy_busted": enemy_busted}
             else:
                 # Hit or stand chosen on the split prompt -- fall through to normal play
                 # Put the choice back by handling it inline
@@ -763,13 +908,19 @@ class Game:
                     player_busted = False
                     p_val = hand_value(player_cards)
 
+                    ehp_before = enemy.hp
+                    php_before = self.player.hp
                     enemy_cards, enemy_busted, e_val = self._enemy_turn(enemy, enemy_cards, p_val=p_val)
                     print()
                     beat(0.3)
                     won, lost = self._resolve_hand(p_val, e_val, False, enemy_busted, player_cards, enemy)
                     self._apply_siphon(player_cards)
                     self._hand_callouts(player_cards, won, lost, False, p_val, e_val, enemy_busted)
-                    return
+                    return {"action": "stood", "p_val": p_val, "e_val": e_val,
+                            "won": won, "lost": lost,
+                            "dmg_dealt": max(0, ehp_before - enemy.hp),
+                            "dmg_taken": max(0, php_before - self.player.hp),
+                            "enemy_busted": enemy_busted}
                 elif choice == "right":
                     card = self.deck.draw()
                     player_cards.append(card)
@@ -784,7 +935,10 @@ class Game:
             first_decision_consumed=hit_from_split_prompt,
         )
         if folded:
-            return "fold"
+            fold_dmg = self.config.damage.fold_damage
+            return {"action": "folded", "p_val": hand_value(player_cards),
+                    "e_val": hand_value(enemy_cards), "won": False, "lost": True,
+                    "dmg_dealt": 0, "dmg_taken": fold_dmg, "enemy_busted": False}
 
         p_val = hand_value(player_cards)
 
@@ -794,12 +948,20 @@ class Game:
             e_val = hand_value(enemy_cards)
             print(f"  Enemy had  {show_hand(enemy_cards)}  -> {e_val}")
             beat(0.3)
+            ehp_before = enemy.hp
+            php_before = self.player.hp
             won, lost = self._resolve_hand(p_val, e_val, True, False, player_cards, enemy)
             self._apply_siphon(player_cards)
             self._hand_callouts(player_cards, won, lost, True, p_val, e_val, False)
-            return
+            return {"action": "busted", "p_val": p_val, "e_val": e_val,
+                    "won": won, "lost": lost,
+                    "dmg_dealt": max(0, ehp_before - enemy.hp),
+                    "dmg_taken": max(0, php_before - self.player.hp),
+                    "enemy_busted": False}
 
         # Enemy turn
+        ehp_before = enemy.hp
+        php_before = self.player.hp
         enemy_cards, enemy_busted, e_val = self._enemy_turn(enemy, enemy_cards, p_val=p_val)
 
         # Resolve
@@ -810,6 +972,12 @@ class Game:
 
         # Highlight callouts
         self._hand_callouts(player_cards, won, lost, player_busted, p_val, e_val, enemy_busted)
+
+        return {"action": "stood", "p_val": p_val, "e_val": e_val,
+                "won": won, "lost": lost,
+                "dmg_dealt": max(0, ehp_before - enemy.hp),
+                "dmg_taken": max(0, php_before - self.player.hp),
+                "enemy_busted": enemy_busted}
 
     def _hand_callouts(self, player_cards, won, lost, player_busted, p_val, e_val, enemy_busted):
         """Show flavor text after a hand resolves."""
@@ -832,6 +1000,7 @@ class Game:
     def _player_turn(self, player_cards, enemy, enemy_cards, has_peek, allow_fold=True, label=None, first_decision_consumed=False):
         """Run player hit/stand loop. Returns (cards, busted, folded)."""
         first_decision = not first_decision_consumed
+        need_reprint = first_decision_consumed
         forced = enemy.forced_extra_hits
         player_busted = False
 
@@ -860,37 +1029,34 @@ class Game:
                 card = self.deck.draw()
                 player_cards.append(card)
                 print(f"  Drew {show_card(card)}  = {hand_value(player_cards)}")
+                need_reprint = True
                 first_decision = False
                 continue
 
             bust_pct = self.deck.bust_probability(player_cards) * 100
             deck_ct = len(self.deck.cards)
 
-            if bust_pct > 70:
-                bust_color = C_RED
-            elif bust_pct >= 20:
-                bust_color = C_YELLOW
-            else:
-                bust_color = C_GREEN
-            bust_str = f"{bust_color}bust: {bust_pct:.0f}%{C_RESET}"
-
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES"}
 
             # Reprint hands so they're always visible at the prompt
+            if need_reprint:
+                print()
+                if label:
+                    print(f"  {C_DIM}{label}{C_RESET}")
+                print(f"  You    {show_hand(player_cards)}   = {p_val}")
+                threshold_str = f"stands at {enemy.hit_threshold}"
+                if has_peek:
+                    print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+                else:
+                    print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+            need_reprint = True
+
             print()
-            if label:
-                print(f"  {C_DIM}{label}{C_RESET}")
-            print(f"  You    {show_hand(player_cards)}   = {p_val}")
-            threshold_str = f"stands at {enemy.hit_threshold}"
-            if has_peek:
-                print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
-            else:
-                print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+            self._print_decision_hud(p_val, player_cards, enemy, bust_pct, deck_ct)
 
             can_fold = allow_fold and first_decision and self.player.folds > 0
-            stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
 
-            print(f"\n  \u2192 Hit   \u2190 Stand                    {stats_str}")
+            print(f"\n  \u2192 Hit   \u2190 Stand")
             if can_fold:
                 fold_str = f"\u2193 Fold ({self.player.folds})"
                 choice = prompt_choice(
@@ -1129,6 +1295,10 @@ class Game:
             result = self.play_hand(enemy, hand_num)
             total_dealt += max(0, ehp_before - enemy.hp)
             total_taken += max(0, php_before - self.player.hp)
+
+            summary = format_hand_summary(result)
+            if summary:
+                print(f"\n  {summary}")
 
             # Show both HP bars after each hand
             if self.player.alive and enemy.alive:
