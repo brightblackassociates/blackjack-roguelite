@@ -657,6 +657,15 @@ class Game:
 
             arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES"}
 
+            # Reprint hands so they're always visible at the prompt
+            print()
+            print(f"  You    {show_hand(player_cards)}   = {p_val}")
+            threshold_str = f"stands at {enemy.hit_threshold}"
+            if has_peek:
+                print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+            else:
+                print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+
             can_fold = first_decision and self.player.folds > 0
             stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
 
