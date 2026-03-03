@@ -968,6 +968,8 @@ class Game:
     # --- Post-fight reward ---
 
     def post_fight_reward(self, enemy):
+        print()
+        self.show_status()
         print(f"\n  {C_BYELLOW}--- REWARD ---{C_RESET}")
 
         # Build options mapped to arrow directions
