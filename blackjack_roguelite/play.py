@@ -962,13 +962,8 @@ class Game:
         print(f"\n  {C_BYELLOW}--- REWARD ---{C_RESET}")
 
         # Build options mapped to arrow directions
-        arrows = ["left", "right", "down", "up"]
-        arrow_syms = {
-            "left": "\u2190",
-            "right": "\u2192",
-            "down": "\u2193",
-            "up": "\u2191",
-        }
+        arrows = ["left", "right", "down"]
+        arrow_syms = {"left": "\u2190", "right": "\u2192", "down": "\u2193"}
         options = []       # (label, action_id)
 
         # Option: Remove a card
@@ -1009,6 +1004,11 @@ class Game:
             print("  No rewards available.")
             pause()
             return
+
+        # Offer 3 random choices per reward
+        if len(options) > 3:
+            random.shuffle(options)
+            options = options[:3]
 
         valid_keys = []
         labels = {}
