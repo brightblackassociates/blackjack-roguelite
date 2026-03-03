@@ -260,6 +260,12 @@ class Game:
         print(f"    \u2193 Fold (take {self.config.damage.fold_damage} dmg, costs 1 fold)")
         print(f"    \u2191 Info panel (enemy, companions, deck)")
         print(f"    r Rules (this screen)")
+        print(f"    s Split (pairs only, plays two hands)")
+        print()
+        print(f"  {C_BWHITE}Split:{C_RESET} When dealt a pair, press s to split into")
+        print(f"  two hands. Each gets a new second card and plays")
+        print(f"  separately. Both resolve against the enemy's single")
+        print(f"  hand. Lose both and you take damage twice.")
         print()
         print(f"  {C_BWHITE}Folds:{C_RESET} Limited resource. Start with {self.config.fold.starting_folds}.")
         print(f"  Folding costs 1 fold and {self.config.damage.fold_damage} HP.")
@@ -611,8 +617,221 @@ class Game:
         else:
             print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
 
-        # --- Fold option (first decision only) ---
-        first_decision = True
+        # --- Split detection ---
+        can_split = (len(player_cards) == 2
+                     and player_cards[0].rank == player_cards[1].rank)
+
+        hit_from_split_prompt = False
+        while can_split:
+            # Offer split as first-decision option
+            bust_pct = self.deck.bust_probability(player_cards) * 100
+            deck_ct = len(self.deck.cards)
+            if bust_pct > 70:
+                bust_color = C_RED
+            elif bust_pct >= 20:
+                bust_color = C_YELLOW
+            else:
+                bust_color = C_GREEN
+            bust_str = f"{bust_color}bust: {bust_pct:.0f}%{C_RESET}"
+
+            arrow_labels = {"right": "HIT", "left": "STAND", "down": "FOLD", "up": "INFO", "r": "RULES", "s": "SPLIT"}
+
+            print()
+            print(f"  You    {show_hand(player_cards)}   = {hand_value(player_cards)}")
+            threshold_str = f"stands at {enemy.hit_threshold}"
+            if has_peek:
+                print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+            else:
+                print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+
+            has_folds = self.player.folds > 0
+            stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
+
+            print(f"\n  \u2192 Hit   \u2190 Stand                    {stats_str}")
+            valid_keys = ["right", "left", "up", "r", "s"]
+            if has_folds:
+                fold_str = f"\u2193 Fold ({self.player.folds})"
+                valid_keys.append("down")
+                choice = prompt_choice(
+                    f"{fold_str}  \u2191 Info  r Rules  s Split",
+                    valid_keys,
+                    arrow_labels,
+                )
+            else:
+                choice = prompt_choice(
+                    f"{C_DIM}\u2193 Fold (0){C_RESET}  \u2191 Info  r Rules  s Split",
+                    valid_keys,
+                    arrow_labels,
+                )
+
+            if choice == "up":
+                self.inspect_panel(enemy, player_cards)
+                continue
+            elif choice == "r":
+                self.show_rules()
+                continue
+            elif choice == "down":
+                self.player.folds -= 1
+                fold_dmg = self.config.damage.fold_damage
+                print(f"  Folded. Take {fold_dmg} chip damage. ({self.player.folds} folds left)")
+                self.hurt_player(fold_dmg)
+                return "fold"
+            elif choice == "s":
+                # --- Split flow ---
+                card_a, card_b = player_cards
+                hand_a = [card_a, self.deck.draw()]
+                hand_b = [card_b, self.deck.draw()]
+
+                print(f"\n  {C_BYELLOW}Split!{C_RESET}")
+                beat(0.3)
+
+                # Hand 1a
+                label_a = f"\u2500\u2500 Hand {hand_num}a \u2500\u2500"
+                print(f"\n  {C_DIM}{label_a}{C_RESET}")
+                print(f"  You    {show_hand(hand_a)}   = {hand_value(hand_a)}")
+                threshold_str = f"stands at {enemy.hit_threshold}"
+                if has_peek:
+                    print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+                else:
+                    print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+
+                hand_a, busted_a, _ = self._player_turn(
+                    hand_a, enemy, enemy_cards, has_peek,
+                    allow_fold=False, label=f"\u2500\u2500 Hand {hand_num}a \u2500\u2500")
+
+                # Hand 1b
+                label_b = f"\u2500\u2500 Hand {hand_num}b \u2500\u2500"
+                print(f"\n  {C_DIM}{label_b}{C_RESET}")
+                print(f"  You    {show_hand(hand_b)}   = {hand_value(hand_b)}")
+                if has_peek:
+                    print(f"  Enemy  {show_hand(enemy_cards)}   = {hand_value(enemy_cards)}  {C_CYAN}[Shadow Thief]{C_RESET}")
+                else:
+                    print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
+
+                hand_b, busted_b, _ = self._player_turn(
+                    hand_b, enemy, enemy_cards, has_peek,
+                    allow_fold=False, label=f"\u2500\u2500 Hand {hand_num}b \u2500\u2500")
+
+                # Enemy turn (once) -- aware enemies target the best non-busted hand
+                best_p = max(
+                    (hand_value(h) for h, b in [(hand_a, busted_a), (hand_b, busted_b)] if not b),
+                    default=0)
+                enemy_cards, enemy_busted, e_val = self._enemy_turn(enemy, enemy_cards, p_val=best_p)
+
+                # Resolve each hand
+                print()
+                p_val_a = hand_value(hand_a)
+                p_val_b = hand_value(hand_b)
+
+                won_a, lost_a = self._resolve_hand(
+                    p_val_a, e_val, busted_a, enemy_busted, hand_a, enemy,
+                    label=f"Hand {hand_num}a:")
+                self._apply_siphon(hand_a)
+
+                won_b, lost_b = self._resolve_hand(
+                    p_val_b, e_val, busted_b, enemy_busted, hand_b, enemy,
+                    label=f"Hand {hand_num}b:")
+                self._apply_siphon(hand_b)
+
+                # Callouts for each hand
+                for tag, cards, won, lost, busted, p_v in [
+                    (f"Hand {hand_num}a", hand_a, won_a, lost_a, busted_a, p_val_a),
+                    (f"Hand {hand_num}b", hand_b, won_b, lost_b, busted_b, p_val_b),
+                ]:
+                    if p_v == 22 and busted:
+                        beat(0.3)
+                        print(f"  {C_DIM}{tag}: Just one over...{C_RESET}")
+                    if len(cards) >= 5 and not busted:
+                        beat(0.2)
+                        print(f"  {C_BWHITE}{tag}: Five cards!{C_RESET}")
+                    if won and not enemy_busted and p_v - e_val == 1:
+                        beat(0.3)
+                        print(f"  {C_GREEN}{tag}: By a hair!{C_RESET}")
+                    if lost and not busted and e_val - p_v == 1:
+                        beat(0.3)
+                        print(f"  {C_RED}{tag}: So close...{C_RESET}")
+                if (won_a or won_b) and self.player.hp <= self.player.max_hp * 0.2:
+                    beat(0.4)
+                    print(f"  {C_BGREEN}Clutch!{C_RESET}")
+                return
+            else:
+                # Hit or stand chosen on the split prompt -- fall through to normal play
+                # Put the choice back by handling it inline
+                if choice == "left":
+                    print(f"  Stand at {hand_value(player_cards)}.")
+                    # Skip player turn, go straight to enemy
+                    player_busted = False
+                    p_val = hand_value(player_cards)
+
+                    enemy_cards, enemy_busted, e_val = self._enemy_turn(enemy, enemy_cards, p_val=p_val)
+                    print()
+                    beat(0.3)
+                    won, lost = self._resolve_hand(p_val, e_val, False, enemy_busted, player_cards, enemy)
+                    self._apply_siphon(player_cards)
+                    self._hand_callouts(player_cards, won, lost, False, p_val, e_val, enemy_busted)
+                    return
+                elif choice == "right":
+                    card = self.deck.draw()
+                    player_cards.append(card)
+                    print(f"  Drew {show_card(card)}  = {hand_value(player_cards)}")
+                    hit_from_split_prompt = True
+                    break
+
+        # --- Normal (non-split) flow ---
+        player_cards, player_busted, folded = self._player_turn(
+            player_cards, enemy, enemy_cards, has_peek,
+            allow_fold=(not hit_from_split_prompt),
+            first_decision_consumed=hit_from_split_prompt,
+        )
+        if folded:
+            return "fold"
+
+        p_val = hand_value(player_cards)
+
+        # Player busted: reveal enemy and resolve
+        if player_busted:
+            beat(0.5)
+            e_val = hand_value(enemy_cards)
+            print(f"  Enemy had  {show_hand(enemy_cards)}  -> {e_val}")
+            beat(0.3)
+            won, lost = self._resolve_hand(p_val, e_val, True, False, player_cards, enemy)
+            self._apply_siphon(player_cards)
+            self._hand_callouts(player_cards, won, lost, True, p_val, e_val, False)
+            return
+
+        # Enemy turn
+        enemy_cards, enemy_busted, e_val = self._enemy_turn(enemy, enemy_cards, p_val=p_val)
+
+        # Resolve
+        print()
+        beat(0.3)
+        won, lost = self._resolve_hand(p_val, e_val, False, enemy_busted, player_cards, enemy)
+        self._apply_siphon(player_cards)
+
+        # Highlight callouts
+        self._hand_callouts(player_cards, won, lost, player_busted, p_val, e_val, enemy_busted)
+
+    def _hand_callouts(self, player_cards, won, lost, player_busted, p_val, e_val, enemy_busted):
+        """Show flavor text after a hand resolves."""
+        if p_val == 22 and player_busted:
+            beat(0.3)
+            print(f"  {C_DIM}Just one over...{C_RESET}")
+        if len(player_cards) >= 5 and not player_busted:
+            beat(0.2)
+            print(f"  {C_BWHITE}Five cards!{C_RESET}")
+        if won and not enemy_busted and p_val - e_val == 1:
+            beat(0.3)
+            print(f"  {C_GREEN}By a hair!{C_RESET}")
+        if lost and not player_busted and e_val - p_val == 1:
+            beat(0.3)
+            print(f"  {C_RED}So close...{C_RESET}")
+        if won and self.player.hp <= self.player.max_hp * 0.2:
+            beat(0.4)
+            print(f"  {C_BGREEN}Clutch!{C_RESET}")
+
+    def _player_turn(self, player_cards, enemy, enemy_cards, has_peek, allow_fold=True, label=None, first_decision_consumed=False):
+        """Run player hit/stand loop. Returns (cards, busted, folded)."""
+        first_decision = not first_decision_consumed
         forced = enemy.forced_extra_hits
         player_busted = False
 
@@ -659,6 +878,8 @@ class Game:
 
             # Reprint hands so they're always visible at the prompt
             print()
+            if label:
+                print(f"  {C_DIM}{label}{C_RESET}")
             print(f"  You    {show_hand(player_cards)}   = {p_val}")
             threshold_str = f"stands at {enemy.hit_threshold}"
             if has_peek:
@@ -666,7 +887,7 @@ class Game:
             else:
                 print(f"  Enemy  {show_card(enemy_cards[0])} {C_DIM}??{C_RESET}                   {C_DIM}{threshold_str}{C_RESET}")
 
-            can_fold = first_decision and self.player.folds > 0
+            can_fold = allow_fold and first_decision and self.player.folds > 0
             stats_str = f"{bust_str}  deck: {deck_ct} \u25b8"
 
             print(f"\n  \u2192 Hit   \u2190 Stand                    {stats_str}")
@@ -677,7 +898,7 @@ class Game:
                     ["right", "left", "down", "up", "r"],
                     arrow_labels,
                 )
-            elif first_decision:
+            elif allow_fold and first_decision:
                 choice = prompt_choice(
                     f"{C_DIM}\u2193 Fold (0){C_RESET}  \u2191 Info  r Rules",
                     ["right", "left", "up", "r"],
@@ -705,7 +926,7 @@ class Game:
                 fold_dmg = self.config.damage.fold_damage
                 print(f"  Folded. Take {fold_dmg} chip damage. ({self.player.folds} folds left)")
                 self.hurt_player(fold_dmg)
-                return "fold"
+                return player_cards, False, True
 
             if choice == "left":
                 print(f"  Stand at {p_val}.")
@@ -715,29 +936,23 @@ class Game:
             player_cards.append(card)
             print(f"  Drew {show_card(card)}  = {hand_value(player_cards)}")
 
-        p_val = hand_value(player_cards)
+        return player_cards, player_busted, False
 
-        # --- Player busted: lose immediately ---
-        if player_busted:
-            beat(0.5)
-            e_val = hand_value(enemy_cards)
-            print(f"  Enemy had  {show_hand(enemy_cards)}  -> {e_val}")
-            beat(0.3)
-            dmg = self._calc_loss_damage(e_val, p_val, is_bust=True,
-                                         player_cards=player_cards, bonus_damage=enemy.bonus_damage)
-            self.hurt_player(dmg)
-            if enemy.drain:
-                self._apply_drain(enemy, dmg)
-            self._apply_siphon(player_cards)
-            return
+    def _enemy_turn(self, enemy, enemy_cards, p_val=None):
+        """Run enemy draws. Returns (cards, busted, e_val).
 
-        # --- Enemy turn ---
+        p_val: player's final hand value. Elite/boss enemies use this
+        to stop drawing once they're ahead.
+        """
+        aware = enemy.tier in ("elite", "boss")
         beat(0.5)
         print(f"\n  Enemy flips  {show_card(enemy_cards[1])}")
         beat(0.25)
         print(f"  Enemy hand   {show_hand(enemy_cards)}  -> {hand_value(enemy_cards)}")
 
         while hand_value(enemy_cards) <= enemy.hit_threshold:
+            if aware and p_val and hand_value(enemy_cards) > p_val:
+                break
             beat(0.3)
             card = self.deck.draw()
             enemy_cards.append(card)
@@ -745,6 +960,8 @@ class Game:
 
         for _ in range(enemy.reckless_extra):
             if hand_value(enemy_cards) < 21:
+                if aware and p_val and hand_value(enemy_cards) > p_val:
+                    break
                 beat(0.3)
                 card = self.deck.draw()
                 enemy_cards.append(card)
@@ -757,24 +974,39 @@ class Game:
             beat(0.4)
             print(f"  {C_BGREEN}ENEMY BUSTS!{C_RESET} ({e_val})")
 
-        # --- Resolve ---
-        print()
-        beat(0.3)
+        return enemy_cards, enemy_busted, e_val
+
+    def _resolve_hand(self, p_val, e_val, player_busted, enemy_busted, player_cards, enemy, label=None):
+        """Resolve one hand vs enemy. Returns (won, lost)."""
+        prefix = f"{label} " if label else ""
         won = False
         lost = False
-        if enemy_busted:
+
+        if player_busted:
+            if label:
+                beat(0.3)
+                print(f"  {C_RED}{prefix}Bust!{C_RESET} ({p_val})")
+            dmg = self._calc_loss_damage(e_val, p_val, is_bust=True,
+                                         player_cards=player_cards, bonus_damage=enemy.bonus_damage)
+            self.hurt_player(dmg)
+            if enemy.drain:
+                self._apply_drain(enemy, dmg)
+            lost = True
+        elif enemy_busted:
+            if label:
+                print(f"  {C_GREEN}{prefix}You win!{C_RESET} {p_val} vs {e_val} (bust)")
             beat(0.3)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
             won = True
         elif p_val > e_val:
-            print(f"  {C_GREEN}You win!{C_RESET} {p_val} vs {e_val}")
+            print(f"  {C_GREEN}{prefix}You win!{C_RESET} {p_val} vs {e_val}")
             beat(0.15)
             dmg = self._calc_win_damage(p_val, e_val, player_cards=player_cards)
             self.hurt_enemy(enemy, dmg)
             won = True
         elif e_val > p_val:
-            print(f"  {C_RED}You lose.{C_RESET} {p_val} vs {e_val}")
+            print(f"  {C_RED}{prefix}You lose.{C_RESET} {p_val} vs {e_val}")
             beat(0.15)
             dmg = self._calc_loss_damage(e_val, p_val, player_cards=player_cards,
                                          bonus_damage=enemy.bonus_damage)
@@ -783,25 +1015,9 @@ class Game:
                 self._apply_drain(enemy, dmg)
             lost = True
         else:
-            print(f"  {C_YELLOW}Push.{C_RESET} Both {p_val}.")
-        self._apply_siphon(player_cards)
+            print(f"  {C_YELLOW}{prefix}Push.{C_RESET} Both {p_val}.")
 
-        # --- Highlight callouts ---
-        if p_val == 22 and player_busted:
-            beat(0.3)
-            print(f"  {C_DIM}Just one over...{C_RESET}")
-        if len(player_cards) >= 5 and not player_busted:
-            beat(0.2)
-            print(f"  {C_BWHITE}Five cards!{C_RESET}")
-        if won and not enemy_busted and p_val - e_val == 1:
-            beat(0.3)
-            print(f"  {C_GREEN}By a hair!{C_RESET}")
-        if lost and not player_busted and e_val - p_val == 1:
-            beat(0.3)
-            print(f"  {C_RED}So close...{C_RESET}")
-        if won and self.player.hp <= self.player.max_hp * 0.2:
-            beat(0.4)
-            print(f"  {C_BGREEN}Clutch!{C_RESET}")
+        return won, lost
 
     def _calc_win_damage(self, p_val, e_val, is_natural=False, player_cards=None):
         cfg = self.config.damage
