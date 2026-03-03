@@ -160,7 +160,7 @@ def prompt_choice(msg, valid, labels=None):
 
 
 def pause(msg="  Press any key to continue..."):
-    sys.stdout.write(msg)
+    sys.stdout.write(f"{msg} \033[5m\u25b8\033[0m ")
     sys.stdout.flush()
     try:
         read_key()
