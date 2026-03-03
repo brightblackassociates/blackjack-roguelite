@@ -145,6 +145,86 @@ DEFAULT_EXPERIENCE_TARGETS = [
         "Win rate last act vs first act",
         1.02, 1.15, "x",
     ),
+    ExperienceTarget(
+        "split_rate",
+        "Pct of hands where player chooses split",
+        8, 25,
+    ),
+    ExperienceTarget(
+        "counterplay_success_rate",
+        "Pct of enemy chase scenarios where player avoids losing",
+        35, 65,
+    ),
+    ExperienceTarget(
+        "reward_variety_rate",
+        "Avg per-run reward-type variety (normalized)",
+        45, 75,
+    ),
+    ExperienceTarget(
+        "build_pivot_rate",
+        "Pct of runs with a meaningful reward-priority pivot mid-run",
+        20, 50,
+    ),
+    ExperienceTarget(
+        "synergy_online_rate",
+        "Pct of hands with 2+ simultaneous effect procs",
+        8, 25,
+    ),
+    ExperienceTarget(
+        "early_spike_rate",
+        "Pct of runs with an early spike in act 1",
+        55, 85,
+    ),
+    ExperienceTarget(
+        "midrun_novelty_rate",
+        "Pct of act 2+ fights introducing a not-seen-earlier enemy",
+        20, 45,
+    ),
+    ExperienceTarget(
+        "companion_attachment_rate",
+        "Pct of runs where a companion reaches level 3+",
+        20, 50,
+    ),
+    ExperienceTarget(
+        "companion_meaningfulness",
+        "Survival gap: >=2 companions captured vs <=1 companions",
+        8, 30, "pp",
+    ),
+    ExperienceTarget(
+        "high_total_loss_rate",
+        "Pct of non-bust 19+ player hands that still lose",
+        8, 22,
+    ),
+    ExperienceTarget(
+        "enemy_hit_rate",
+        "Enemy hit decisions as pct of total enemy decisions",
+        50, 68,
+    ),
+    ExperienceTarget(
+        "enemy_chase_hit_rate",
+        "Enemy chase hits (while not ahead) as pct of enemy hits",
+        35, 65,
+    ),
+    ExperienceTarget(
+        "enemy_risk_hit_rate",
+        "Enemy high-risk hits (>=35% bust odds) as pct of enemy hits",
+        45, 70,
+    ),
+    ExperienceTarget(
+        "enemy_safe_stand_rate",
+        "Enemy stands while ahead as pct of enemy stands",
+        45, 70,
+    ),
+    ExperienceTarget(
+        "elite_chase_hit_rate",
+        "Elite chase hits as pct of elite hits",
+        80, 99,
+    ),
+    ExperienceTarget(
+        "boss_chase_hit_rate",
+        "Boss chase hits as pct of boss hits",
+        80, 99,
+    ),
 ]
 
 

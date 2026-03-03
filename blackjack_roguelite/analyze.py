@@ -21,18 +21,97 @@ def compute_metrics(results: List[RunResult], config: GameConfig) -> Dict:
     all_fights = []
     all_decisions = []
     act_damages: Dict[int, List[float]] = {}
+    enemy_ai_totals = Counter()
+    enemy_ai_by_tier: Dict[str, Counter] = {}
+    split_hands = 0
+    synergy_hands = 0
+    counterplay_cases = 0
+    counterplay_successes = 0
+    high_total_cases = 0
+    high_total_losses = 0
+    reward_variety_samples: List[float] = []
+    pivot_eligible_runs = 0
+    pivot_success_runs = 0
+    early_spike_runs = 0
+    midrun_novelty_total = 0
+    midrun_novelty_new = 0
+    companion_attachment_runs = 0
+    high_comp_total = high_comp_survived = 0
+    low_comp_total = low_comp_survived = 0
 
     fights_per_act = config.run.fights_per_act + config.run.elites_per_act + 1
 
     for run in results:
+        seen_enemies = set()
+        run_early_spike = False
+        rewards = [r for r in run.rewards_chosen if r]
+        if rewards:
+            reward_variety_samples.append(len(set(rewards)) / 5.0)
+        else:
+            reward_variety_samples.append(0.0)
+
+        if len(rewards) >= 4:
+            pivot_eligible_runs += 1
+            split_at = len(rewards) // 2
+            left = rewards[:split_at]
+            right = rewards[split_at:]
+            if left and right:
+                left_dom = Counter(left).most_common(1)[0][0]
+                right_dom = Counter(right).most_common(1)[0][0]
+                if left_dom != right_dom and len(set(rewards)) >= 2:
+                    pivot_success_runs += 1
+
+        if any(level >= 3 for level in run.companion_levels.values()):
+            companion_attachment_runs += 1
+
+        comp_count = len(run.companions_captured)
+        if comp_count >= 2:
+            high_comp_total += 1
+            high_comp_survived += 1 if run.survived else 0
+        elif comp_count <= 1:
+            low_comp_total += 1
+            low_comp_survived += 1 if run.survived else 0
+
         for i, fight in enumerate(run.fights):
             all_fights.append(fight)
             act = min(i // fights_per_act, config.run.acts - 1)
             act_damages.setdefault(act, []).append(fight.total_damage_dealt)
+            if (
+                act == 0
+                and fight.player_won
+                and len(fight.hands) <= 3
+                and fight.total_damage_dealt >= 8
+            ):
+                run_early_spike = True
+            if act >= 1:
+                midrun_novelty_total += 1
+                if fight.enemy_name not in seen_enemies:
+                    midrun_novelty_new += 1
+            seen_enemies.add(fight.enemy_name)
 
             for hand in fight.hands:
                 all_hands.append(hand)
                 all_decisions.extend(hand.decision_points)
+                if hand.was_split:
+                    split_hands += 1
+                if len(hand.companion_effects) >= 2:
+                    synergy_hands += 1
+                if (not hand.player_busted and hand.outcome != "fold" and hand.player_value >= 19):
+                    high_total_cases += 1
+                    if hand.outcome == "lose":
+                        high_total_losses += 1
+                ai = getattr(hand, "enemy_ai", {}) or {}
+                if ai:
+                    enemy_ai_totals.update(ai)
+                    tier_ctr = enemy_ai_by_tier.setdefault(fight.enemy_tier, Counter())
+                    tier_ctr.update(ai)
+                    if ai.get("chase_hits", 0) > 0 and not hand.player_busted and hand.outcome != "fold":
+                        counterplay_cases += 1
+                        if hand.outcome in ("win", "push"):
+                            counterplay_successes += 1
+
+        if run_early_spike:
+            early_spike_runs += 1
 
     total_hands = len(all_hands)
     total_fights = len(all_fights)
@@ -134,6 +213,39 @@ def compute_metrics(results: List[RunResult], config: GameConfig) -> Dict:
     )
     highlight_rate = memorable_hands / total_hands if total_hands else 0
 
+    ai_hits = enemy_ai_totals.get("hits", 0)
+    ai_stands = enemy_ai_totals.get("stands", 0)
+    ai_total_decisions = ai_hits + ai_stands
+
+    enemy_ai_metrics = {
+        "hit_rate": ai_hits / ai_total_decisions if ai_total_decisions else 0,
+        "chase_hit_rate": enemy_ai_totals.get("chase_hits", 0) / ai_hits if ai_hits else 0,
+        "risk_hit_rate": enemy_ai_totals.get("risk_hits", 0) / ai_hits if ai_hits else 0,
+        "reckless_hit_rate": enemy_ai_totals.get("reckless_hits", 0) / ai_hits if ai_hits else 0,
+        "safe_stand_rate": enemy_ai_totals.get("safe_stands", 0) / ai_stands if ai_stands else 0,
+    }
+
+    enemy_ai_tier_metrics = {}
+    for tier, ctr in enemy_ai_by_tier.items():
+        th = ctr.get("hits", 0)
+        ts = ctr.get("stands", 0)
+        td = th + ts
+        enemy_ai_tier_metrics[tier] = {
+            "hit_rate": th / td if td else 0,
+            "chase_hit_rate": ctr.get("chase_hits", 0) / th if th else 0,
+            "risk_hit_rate": ctr.get("risk_hits", 0) / th if th else 0,
+            "safe_stand_rate": ctr.get("safe_stands", 0) / ts if ts else 0,
+        }
+
+    elite_ai = enemy_ai_tier_metrics.get("elite", {})
+    boss_ai = enemy_ai_tier_metrics.get("boss", {})
+    if high_comp_total > 0 and low_comp_total > 0:
+        companion_meaningfulness = (
+            (high_comp_survived / high_comp_total) - (low_comp_survived / low_comp_total)
+        ) * 100
+    else:
+        companion_meaningfulness = 0.0
+
     return {
         "total_runs": total_runs,
         "total_hands": total_hands,
@@ -158,10 +270,43 @@ def compute_metrics(results: List[RunResult], config: GameConfig) -> Dict:
         "avg_cards_removed": avg_cards_removed,
         "avg_enchantments": avg_enchantments,
         "power_curve_ratio": power_curve_ratio,
+        # Fun model metrics
+        "split_rate": split_hands / total_hands if total_hands else 0,
+        "counterplay_success_rate": (
+            counterplay_successes / counterplay_cases if counterplay_cases else 0
+        ),
+        "reward_variety_rate": (
+            sum(reward_variety_samples) / len(reward_variety_samples)
+            if reward_variety_samples else 0
+        ),
+        "build_pivot_rate": (
+            pivot_success_runs / pivot_eligible_runs if pivot_eligible_runs else 0
+        ),
+        "synergy_online_rate": synergy_hands / total_hands if total_hands else 0,
+        "early_spike_rate": early_spike_runs / total_runs if total_runs else 0,
+        "midrun_novelty_rate": (
+            midrun_novelty_new / midrun_novelty_total if midrun_novelty_total else 0
+        ),
+        "companion_attachment_rate": companion_attachment_runs / total_runs if total_runs else 0,
+        "companion_meaningfulness": companion_meaningfulness,
+        "high_total_loss_rate": (
+            high_total_losses / high_total_cases if high_total_cases else 0
+        ),
+        # Flattened AI metrics for target evaluation
+        "enemy_hit_rate": enemy_ai_metrics["hit_rate"],
+        "enemy_chase_hit_rate": enemy_ai_metrics["chase_hit_rate"],
+        "enemy_risk_hit_rate": enemy_ai_metrics["risk_hit_rate"],
+        "enemy_safe_stand_rate": enemy_ai_metrics["safe_stand_rate"],
+        "elite_chase_hit_rate": elite_ai.get("chase_hit_rate", 0),
+        "boss_chase_hit_rate": boss_ai.get("chase_hit_rate", 0),
         # Highlights
         "highlight_rate": highlight_rate,
         "highlight_counts": dict(highlight_counts),
         "highlight_total": len(all_highlights),
+        # Enemy AI telemetry
+        "enemy_ai_counts": dict(enemy_ai_totals),
+        "enemy_ai_metrics": enemy_ai_metrics,
+        "enemy_ai_tier_metrics": enemy_ai_tier_metrics,
     }
 
 
@@ -177,6 +322,22 @@ METRIC_MAP = {
     "fold_rate": "fold_rate",
     "deck_trim": "avg_cards_removed",
     "power_curve_ratio": "power_curve_ratio",
+    "enemy_hit_rate": "enemy_hit_rate",
+    "enemy_chase_hit_rate": "enemy_chase_hit_rate",
+    "enemy_risk_hit_rate": "enemy_risk_hit_rate",
+    "enemy_safe_stand_rate": "enemy_safe_stand_rate",
+    "elite_chase_hit_rate": "elite_chase_hit_rate",
+    "boss_chase_hit_rate": "boss_chase_hit_rate",
+    "split_rate": "split_rate",
+    "counterplay_success_rate": "counterplay_success_rate",
+    "reward_variety_rate": "reward_variety_rate",
+    "build_pivot_rate": "build_pivot_rate",
+    "synergy_online_rate": "synergy_online_rate",
+    "early_spike_rate": "early_spike_rate",
+    "midrun_novelty_rate": "midrun_novelty_rate",
+    "companion_attachment_rate": "companion_attachment_rate",
+    "companion_meaningfulness": "companion_meaningfulness",
+    "high_total_loss_rate": "high_total_loss_rate",
 }
 
 
@@ -304,6 +465,137 @@ def generate_recommendations(metrics: Dict, target_results: Dict, config: GameCo
                 recs.append(f"Power curve too steep ({v:.2f}x). Late game too easy. Consider:")
                 recs.append(f"  - Increase act_hp_multipliers to compensate")
 
+        elif name == "enemy_hit_rate":
+            if low:
+                recs.append(f"Enemy hit rate too low ({v:.1f}%). AI may feel passive. Consider:")
+                recs.append(f"  - Increase enemy target pressure when behind")
+                recs.append(f"  - Raise elite/boss bust tolerance slightly")
+            else:
+                recs.append(f"Enemy hit rate too high ({v:.1f}%). AI may feel reckless. Consider:")
+                recs.append(f"  - Lower bust-risk tolerance in enemy policy")
+                recs.append(f"  - Increase stand bias for attrition enemies")
+
+        elif name == "enemy_chase_hit_rate":
+            if low:
+                recs.append(f"Enemy chase-hit rate too low ({v:.1f}%). AI may miss comeback pressure. Consider:")
+                recs.append(f"  - Increase chase branch weight when enemy trails player hand")
+            else:
+                recs.append(f"Enemy chase-hit rate too high ({v:.1f}%). AI may overforce races. Consider:")
+                recs.append(f"  - Require lower bust odds before chase hits")
+
+        elif name == "enemy_risk_hit_rate":
+            if low:
+                recs.append(f"Enemy high-risk hit rate too low ({v:.1f}%). Behavior may feel too safe. Consider:")
+                recs.append(f"  - Increase risk appetite for volatile enemies (reckless/nine lives)")
+            else:
+                recs.append(f"Enemy high-risk hit rate too high ({v:.1f}%). AI may feel random. Consider:")
+                recs.append(f"  - Tighten bust thresholds on borderline hit decisions")
+
+        elif name == "enemy_safe_stand_rate":
+            if low:
+                recs.append(f"Enemy safe-stand rate too low ({v:.1f}%). AI may throw winning positions. Consider:")
+                recs.append(f"  - Increase stand preference when already ahead")
+            else:
+                recs.append(f"Enemy safe-stand rate too high ({v:.1f}%). AI may feel over-scripted. Consider:")
+                recs.append(f"  - Add selective chase hits from advantaged states")
+
+        elif name == "elite_chase_hit_rate":
+            if low:
+                recs.append(f"Elite chase-hit rate too low ({v:.1f}%). Elites may not pressure enough. Consider:")
+                recs.append(f"  - Raise elite chase aggression when behind strong player totals")
+            else:
+                recs.append(f"Elite chase-hit rate too high ({v:.1f}%). Elites may overcommit. Consider:")
+                recs.append(f"  - Decrease elite chase chance on high bust odds")
+
+        elif name == "boss_chase_hit_rate":
+            if low:
+                recs.append(f"Boss chase-hit rate too low ({v:.1f}%). Bosses may feel too tame. Consider:")
+                recs.append(f"  - Increase boss endgame pressure when trailing")
+            else:
+                recs.append(f"Boss chase-hit rate too high ({v:.1f}%). Bosses may feel all-in every hand. Consider:")
+                recs.append(f"  - Require stricter odds before boss chase hits")
+
+        elif name == "split_rate":
+            if low:
+                recs.append(f"Split rate too low ({v:.1f}%). Splitting may not feel meaningful. Consider:")
+                recs.append(f"  - Improve split heuristics for basic/smart strategies")
+                recs.append(f"  - Increase split payoff on strong pair breakouts")
+            else:
+                recs.append(f"Split rate too high ({v:.1f}%). Splitting may be over-centralizing. Consider:")
+                recs.append(f"  - Narrow split conditions for medium-value pairs")
+
+        elif name == "counterplay_success_rate":
+            if low:
+                recs.append(f"Counterplay success too low ({v:.1f}%). Enemy pressure may feel unfair. Consider:")
+                recs.append(f"  - Add clearer intent windows before chase-heavy enemy lines")
+            else:
+                recs.append(f"Counterplay success too high ({v:.1f}%). Enemy threats may feel toothless. Consider:")
+                recs.append(f"  - Raise chase pressure when player shows high totals")
+
+        elif name == "reward_variety_rate":
+            if low:
+                recs.append(f"Reward variety too low ({v:.1f}%). Runs may feel samey. Consider:")
+                recs.append(f"  - Increase value of non-heal options in reward strategy")
+            else:
+                recs.append(f"Reward variety too high ({v:.1f}%). Build identity may get diluted. Consider:")
+                recs.append(f"  - Strengthen specialization incentives for chosen archetypes")
+
+        elif name == "build_pivot_rate":
+            if low:
+                recs.append(f"Build pivot rate too low ({v:.1f}%). Mid-run adaptation is weak. Consider:")
+                recs.append(f"  - Add more conditional rewards that unlock late pivots")
+            else:
+                recs.append(f"Build pivot rate too high ({v:.1f}%). Runs may lack commitment. Consider:")
+                recs.append(f"  - Increase payoff for sticking with established build lines")
+
+        elif name == "synergy_online_rate":
+            if low:
+                recs.append(f"Synergy online rate too low ({v:.1f}%). Combo moments are too rare. Consider:")
+                recs.append(f"  - Increase opportunities to stack enchantment + companion effects")
+            else:
+                recs.append(f"Synergy online rate too high ({v:.1f}%). Power spikes may be too frequent. Consider:")
+                recs.append(f"  - Add diminishing returns for overlapping proc effects")
+
+        elif name == "early_spike_rate":
+            if low:
+                recs.append(f"Early spike rate too low ({v:.1f}%). Early game may feel flat. Consider:")
+                recs.append(f"  - Add stronger act-1 reward moments or earlier payoff events")
+            else:
+                recs.append(f"Early spike rate too high ({v:.1f}%). Early game may be too swingy. Consider:")
+                recs.append(f"  - Smooth opening damage/reward variance")
+
+        elif name == "midrun_novelty_rate":
+            if low:
+                recs.append(f"Mid-run novelty too low ({v:.1f}%). Act 2+ may feel repetitive. Consider:")
+                recs.append(f"  - Increase encounter pattern variety after act 1")
+            else:
+                recs.append(f"Mid-run novelty too high ({v:.1f}%). Run identity may feel random. Consider:")
+                recs.append(f"  - Reinforce recurring enemy themes across acts")
+
+        elif name == "companion_attachment_rate":
+            if low:
+                recs.append(f"Companion attachment too low ({v:.1f}%). Pets may feel disposable. Consider:")
+                recs.append(f"  - Increase companion leveling visibility and per-level impact")
+            else:
+                recs.append(f"Companion attachment too high ({v:.1f}%). Companion choices may become autopicks. Consider:")
+                recs.append(f"  - Add more tradeoffs between companion scaling paths")
+
+        elif name == "companion_meaningfulness":
+            if low:
+                recs.append(f"Companion meaningfulness too low ({v:.1f}pp). Captures may not matter enough. Consider:")
+                recs.append(f"  - Increase companion effect magnitude or activation reliability")
+            else:
+                recs.append(f"Companion meaningfulness too high ({v:.1f}pp). Companions may dominate outcomes. Consider:")
+                recs.append(f"  - Reduce companion scaling or make counters more available")
+
+        elif name == "high_total_loss_rate":
+            if low:
+                recs.append(f"High-total loss rate too low ({v:.1f}%). End-of-hand drama may be muted. Consider:")
+                recs.append(f"  - Let select enemies challenge 19-20 with situational aggression")
+            else:
+                recs.append(f"High-total loss rate too high ({v:.1f}%). Losses may feel unfair at strong totals. Consider:")
+                recs.append(f"  - Reduce enemy over-chasing once player reaches 19+")
+
     return recs
 
 
@@ -359,6 +651,19 @@ def print_report(
     print(f"  Avg Cards Removed / Run:    {metrics['avg_cards_removed']:.1f}")
     print(f"  Avg Enchantments / Run:     {metrics['avg_enchantments']:.1f}")
     print(f"  Power Curve Ratio:          {metrics['power_curve_ratio']:.3f}x")
+
+    # --- Fun loop metrics ---
+    print(f"\n--- FUN LOOP METRICS ---")
+    print(f"  Split Rate:                 {metrics['split_rate']*100:.1f}%")
+    print(f"  Counterplay Success:        {metrics['counterplay_success_rate']*100:.1f}%")
+    print(f"  Reward Variety:             {metrics['reward_variety_rate']*100:.1f}%")
+    print(f"  Build Pivot Rate:           {metrics['build_pivot_rate']*100:.1f}%")
+    print(f"  Synergy Online Rate:        {metrics['synergy_online_rate']*100:.1f}%")
+    print(f"  Early Spike Rate:           {metrics['early_spike_rate']*100:.1f}%")
+    print(f"  Mid-run Novelty Rate:       {metrics['midrun_novelty_rate']*100:.1f}%")
+    print(f"  Companion Attachment:       {metrics['companion_attachment_rate']*100:.1f}%")
+    print(f"  Companion Meaningfulness:   {metrics['companion_meaningfulness']:.1f}pp")
+    print(f"  High-total Loss Rate (19+): {metrics['high_total_loss_rate']*100:.1f}%")
 
     # --- Highlights ---
     print(f"\n--- MEMORABLE MOMENTS ---")
@@ -419,6 +724,30 @@ def print_report(
         else:
             line = f"  {marker}  {t.description}: {v:.1f}  [{t.target_min:.0f}-{t.target_max:.0f}]"
         print(line)
+
+    # --- Enemy AI telemetry ---
+    ai = metrics.get("enemy_ai_counts", {})
+    ai_m = metrics.get("enemy_ai_metrics", {})
+    if ai and (ai.get("hits", 0) + ai.get("stands", 0) > 0):
+        print(f"\n--- ENEMY AI TELEMETRY ---")
+        print(f"  Decisions:                {ai.get('hits', 0) + ai.get('stands', 0)}")
+        print(f"  Hit rate:                 {ai_m.get('hit_rate', 0)*100:.1f}%")
+        print(f"  Chase hit rate:           {ai_m.get('chase_hit_rate', 0)*100:.1f}% of hits")
+        print(f"  High-risk hit rate:       {ai_m.get('risk_hit_rate', 0)*100:.1f}% of hits")
+        print(f"  Reckless extra-hit rate:  {ai_m.get('reckless_hit_rate', 0)*100:.1f}% of hits")
+        print(f"  Safe stand rate:          {ai_m.get('safe_stand_rate', 0)*100:.1f}% of stands")
+
+        tier_m = metrics.get("enemy_ai_tier_metrics", {})
+        for tier in ("normal", "elite", "boss"):
+            if tier not in tier_m:
+                continue
+            tm = tier_m[tier]
+            print(
+                f"  {tier.capitalize():<9} hit {tm['hit_rate']*100:>5.1f}%  "
+                f"chase {tm['chase_hit_rate']*100:>5.1f}%  "
+                f"risk {tm['risk_hit_rate']*100:>5.1f}%  "
+                f"safe-stand {tm['safe_stand_rate']*100:>5.1f}%"
+            )
 
     # --- Strategy comparison ---
     if strategy_comparison:

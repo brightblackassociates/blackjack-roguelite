@@ -281,6 +281,7 @@ class HandResult:
     siphon_heal: int = 0
     was_split: bool = False
     split_results: List['HandResult'] = field(default_factory=list)
+    enemy_ai: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -319,23 +320,101 @@ class CombatEngine:
         self.config = config
         self.deck = Deck()
 
-    def _play_enemy_hand(self, enemy_cards: List[Card], enemy: Enemy, p_val: int = 0):
-        """Enemy plays its hand according to threshold + abilities.
+    @staticmethod
+    def _clamp(val: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, val))
 
-        p_val: player's final hand value. Elite/boss enemies stop drawing
-        once they're already winning.
+    def _play_enemy_hand(self, enemy_cards: List[Card], enemy: Enemy, p_val: int = 0) -> Dict[str, int]:
+        """Enemy plays with tier-aware dynamic behavior.
+
+        Normal enemies stay identity-driven and volatile.
+        Elite/boss enemies adapt to player totals and current combat state.
         """
-        aware = enemy.tier in ("elite", "boss")
-        while hand_value(enemy_cards) <= enemy.hit_threshold:
-            if aware and p_val and hand_value(enemy_cards) > p_val:
+        telemetry = {
+            "hits": 0,
+            "stands": 0,
+            "chase_hits": 0,
+            "risk_hits": 0,
+            "reckless_hits": 0,
+            "safe_stands": 0,
+        }
+
+        if enemy.tier == "normal":
+            target = enemy.hit_threshold
+            if enemy.reckless_extra > 0 or enemy.nine_lives_chance > 0:
+                target += 1
+            if enemy.damage_absorption > 0:
+                target -= 1
+            target = int(self._clamp(target, 12, 19))
+
+            while hand_value(enemy_cards) <= target:
+                if self.deck.bust_probability(enemy_cards) >= 0.35:
+                    telemetry["risk_hits"] += 1
+                telemetry["hits"] += 1
+                enemy_cards.append(self.deck.draw())
+            telemetry["stands"] += 1
+            e_val = hand_value(enemy_cards)
+            if p_val and e_val > p_val:
+                telemetry["safe_stands"] += 1
+        else:
+            while True:
+                e_val = hand_value(enemy_cards)
+                if e_val >= 21:
+                    break
+
+                target = max(enemy.hit_threshold, p_val + 1 if p_val else enemy.hit_threshold)
+                if enemy.poison_per_hand > 0 or enemy.drain:
+                    target -= 1
+                if enemy.hp <= max(2, int(enemy.max_hp * 0.35)):
+                    target += 1
+                target = int(self._clamp(target, 13, 20))
+
+                bust_prob = self.deck.bust_probability(enemy_cards)
+                tolerance = 0.30 if enemy.tier == "elite" else 0.27
+                if enemy.reckless_extra > 0:
+                    tolerance += 0.05
+                if enemy.poison_per_hand > 0 or enemy.drain:
+                    tolerance -= 0.04
+                tolerance = self._clamp(tolerance, 0.10, 0.55)
+
+                if e_val < target - 1:
+                    if p_val and e_val <= p_val:
+                        telemetry["chase_hits"] += 1
+                    if bust_prob >= 0.35:
+                        telemetry["risk_hits"] += 1
+                    telemetry["hits"] += 1
+                    enemy_cards.append(self.deck.draw())
+                    continue
+                if e_val < target and bust_prob <= tolerance:
+                    if p_val and e_val <= p_val:
+                        telemetry["chase_hits"] += 1
+                    if bust_prob >= 0.35:
+                        telemetry["risk_hits"] += 1
+                    telemetry["hits"] += 1
+                    enemy_cards.append(self.deck.draw())
+                    continue
+                if p_val and e_val <= p_val and e_val < 20 and bust_prob <= tolerance - 0.04:
+                    telemetry["chase_hits"] += 1
+                    if bust_prob >= 0.35:
+                        telemetry["risk_hits"] += 1
+                    telemetry["hits"] += 1
+                    enemy_cards.append(self.deck.draw())
+                    continue
+                telemetry["stands"] += 1
+                if p_val and e_val > p_val:
+                    telemetry["safe_stands"] += 1
                 break
-            enemy_cards.append(self.deck.draw())
-        # Reckless: extra hits past threshold
+
+        # Reckless identity: extra push after normal behavior.
         for _ in range(enemy.reckless_extra):
             if hand_value(enemy_cards) < 21:
-                if aware and p_val and hand_value(enemy_cards) > p_val:
-                    break
+                if self.deck.bust_probability(enemy_cards) >= 0.35:
+                    telemetry["risk_hits"] += 1
+                telemetry["hits"] += 1
+                telemetry["reckless_hits"] += 1
                 enemy_cards.append(self.deck.draw())
+
+        return telemetry
 
     def _play_one_sub_hand(self, sub_cards, enemy, strategy, player):
         """Play a single sub-hand (hit/stand loop, no fold). Returns (cards, busted, p_val, decisions)."""
@@ -405,8 +484,9 @@ class CombatEngine:
         best_p = max(
             (hand_value(h) for h, b in [(hand_a, busted_a), (hand_b, busted_b)] if not b),
             default=0)
+        enemy_ai = {}
         if best_p > 0:
-            self._play_enemy_hand(enemy_cards, enemy, p_val=best_p)
+            enemy_ai = self._play_enemy_hand(enemy_cards, enemy, p_val=best_p)
         e_val = hand_value(enemy_cards)
         enemy_busted = e_val > 21
 
@@ -451,6 +531,7 @@ class CombatEngine:
             total_dealt, total_taken, combined_outcome,
             all_decisions, [], highlights,
             was_split=True, split_results=[sub_a, sub_b],
+            enemy_ai=enemy_ai,
         )
 
     def play_hand(self, player: Player, enemy: Enemy, strategy) -> HandResult:
@@ -574,8 +655,9 @@ class CombatEngine:
         # Standard blackjack rule: if player busts, player LOSES.
         # Enemy doesn't need to play. This IS the house edge.
         enemy_busted = False
+        enemy_ai = {}
         if not player_busted:
-            self._play_enemy_hand(enemy_cards, enemy, p_val=p_val)
+            enemy_ai = self._play_enemy_hand(enemy_cards, enemy, p_val=p_val)
             e_val = hand_value(enemy_cards)
             enemy_busted = e_val > 21
         else:
@@ -599,6 +681,7 @@ class CombatEngine:
                 player_cards, enemy_cards, p_val, e_val,
                 False, True, False, False, dmg, 0, "win",
                 decision_points, companion_effects, highlights,
+                enemy_ai=enemy_ai,
             )
 
         # Neither busted: compare values
@@ -625,18 +708,21 @@ class CombatEngine:
                 player_cards, enemy_cards, p_val, e_val,
                 False, False, False, False, dmg, 0, outcome,
                 decision_points, companion_effects, highlights,
+                enemy_ai=enemy_ai,
             )
         elif outcome == "lose":
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 False, False, False, False, 0, dmg, outcome,
                 decision_points, companion_effects, highlights,
+                enemy_ai=enemy_ai,
             )
         # Push
         return HandResult(
             player_cards, enemy_cards, p_val, e_val,
             False, False, False, False, 0, 0, "push",
             decision_points, companion_effects, highlights,
+            enemy_ai=enemy_ai,
         )
 
     # --- Damage helpers ---
