@@ -4,8 +4,8 @@ Simulation harness: player strategies, capture strategies, reward strategies, ba
 import random
 from typing import List, Dict
 
-from .config import GameConfig
-from .engine import hand_value, RunEngine, RunResult, Companion
+from .config import GameConfig, CLASS_TEMPLATES
+from .engine import hand_value, RunEngine, RunResult, Companion, get_non_maxed_talents
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +160,6 @@ class SmartStrategy(Strategy):
 
     def should_split(self, hand_cards, player, enemy):
         rank = hand_cards[0].rank
-        val = hand_value(hand_cards)
         # Always split Aces
         if rank == "A":
             return True
@@ -174,7 +173,7 @@ class SmartStrategy(Strategy):
         if rank == "5":
             return False
         # Split low pairs vs weak-showing enemies
-        if val <= 14 and enemy.hit_threshold <= 16:
+        if hand_value(hand_cards) <= 14 and enemy.hit_threshold <= 16:
             return True
         # Split 9s unless enemy is likely to stay low
         if rank == "9" and enemy.hit_threshold >= 17:
@@ -229,9 +228,14 @@ class RewardStrategy:
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False):
-        """Return 'remove_card', 'heal', 'capture', 'enchant', or 'fold_reward'."""
+                      can_fold_reward=False, can_class_upgrade=False):
+        """Return 'remove_card', 'heal', 'capture', 'enchant', 'fold_reward', or 'class_upgrade'."""
         raise NotImplementedError
+
+    def choose_class_talent(self, player):
+        """Pick which talent to upgrade. Override in class-aware strategies."""
+        non_maxed = get_non_maxed_talents(player)
+        return random.choice(non_maxed) if non_maxed else None
 
     def choose_rank_to_remove(self, removable_ranks, rank_counts):
         """Pick which rank to remove from the deck."""
@@ -260,27 +264,27 @@ class SmartRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False):
+                      can_fold_reward=False, can_class_upgrade=False):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
-        # Capture companions when available and have slots
-        if can_capture and player.can_capture():
+        # Capture remains high-value, but reserve one slot for build flexibility.
+        if can_capture and player.can_capture() and len(player.companions) < 2:
             return "capture"
 
-        # Replenish folds when running low (0-1 remaining)
-        if can_fold_reward and player.folds <= 1:
+        # Replenish folds only when empty to avoid starving deck progression.
+        if can_fold_reward and player.folds <= 0:
             return "fold_reward"
 
         # Heal when critically low
-        if can_heal and hp_pct < 0.40:
+        if can_heal and hp_pct < 0.38:
             return "heal"
 
         # Balance removal and enchanting based on deck state
         cards_removed = 52 - deck.template_size
         total_enchants = deck.total_enchantments()
-        if can_enchant and can_remove and cards_removed >= 2:
-            # Enchant when behind on enchantments (2:1 ratio remove:enchant)
-            if total_enchants < cards_removed // 2:
+        if can_enchant and can_remove and cards_removed >= 5:
+            # Keep enchantments meaningful, but do not starve deck trimming.
+            if total_enchants < max(1, int(cards_removed * 0.45)):
                 return "enchant"
 
         # Trim the deck
@@ -330,7 +334,7 @@ class HealFirstRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False):
+                      can_fold_reward=False, can_class_upgrade=False):
         if can_capture and player.can_capture():
             return "capture"
         if can_heal:
@@ -358,7 +362,7 @@ class RemoveFirstRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False):
+                      can_fold_reward=False, can_class_upgrade=False):
         if can_capture and player.can_capture():
             return "capture"
         if can_remove:
@@ -380,6 +384,89 @@ class RemoveFirstRewardStrategy(RewardStrategy):
 
 
 # ---------------------------------------------------------------------------
+# Class-aware reward strategy
+# ---------------------------------------------------------------------------
+# Soft goals per class: stat -> target value
+_CLASS_SOFT_GOALS = {
+    "thief": {"crit_chance": 0.22, "crit_mult_bonus": 0.45},
+    "warrior": {"damage_reduction_pct": 0.20, "max_hp_bonus": 30},
+    "mage": {"effect_power_pct": 0.35, "bust_penalty_reduction": 0.15},
+}
+
+
+class ClassAwareRewardStrategy(SmartRewardStrategy):
+    """Three-category reward logic: sustain -> class_upgrade -> deck."""
+    name = "class_aware"
+
+    def choose_reward(self, player, deck, enemy,
+                      can_remove=True, can_heal=True,
+                      heal_amount=0, can_capture=False, can_enchant=False,
+                      can_fold_reward=False, can_class_upgrade=False):
+        hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+
+        # Capture still high-value early
+        if can_capture and player.can_capture() and len(player.companions) < 2:
+            return "capture"
+
+        # Sustain: HP critically low
+        if can_heal and hp_pct < 0.35:
+            return "heal"
+
+        # Replenish folds when empty
+        if can_fold_reward and player.folds <= 0:
+            return "fold_reward"
+
+        # Class upgrade: if any key stat is below soft goal
+        if can_class_upgrade and player.class_id:
+            goals = _CLASS_SOFT_GOALS.get(player.class_id, {})
+            for stat, target in goals.items():
+                current = getattr(player.class_stats, stat, 0)
+                if current < target:
+                    return "class_upgrade"
+
+        # Fall through to deck improvement (SmartRewardStrategy logic)
+        cards_removed = 52 - deck.template_size
+        total_enchants = deck.total_enchantments()
+        if can_enchant and can_remove and cards_removed >= 5:
+            if total_enchants < max(1, int(cards_removed * 0.45)):
+                return "enchant"
+        if can_remove:
+            return "remove_card"
+        if can_enchant:
+            return "enchant"
+        if can_heal:
+            return "heal"
+        return "remove_card"
+
+    def choose_class_talent(self, player):
+        """Pick talent whose stat has the largest gap below its soft goal."""
+        if not player.class_id:
+            return None
+        goals = _CLASS_SOFT_GOALS.get(player.class_id, {})
+        non_maxed = get_non_maxed_talents(player)
+        if not non_maxed:
+            return None
+
+        template = CLASS_TEMPLATES[player.class_id]
+        best_key = None
+        best_gap = -999
+
+        for key in non_maxed:
+            td = template["talents"][key]
+            stat = td["stat"]
+            target = goals.get(stat)
+            if target is not None:
+                current = getattr(player.class_stats, stat, 0)
+                gap = target - current
+                if gap > best_gap:
+                    best_gap = gap
+                    best_key = key
+
+        # If no goal-driven talent found, pick first non-maxed
+        return best_key if best_key else non_maxed[0]
+
+
+# ---------------------------------------------------------------------------
 # Simulator
 # ---------------------------------------------------------------------------
 class Simulator:
@@ -392,6 +479,7 @@ class Simulator:
         strategy: Strategy = None,
         capture_strategy: CaptureStrategy = None,
         reward_strategy: RewardStrategy = None,
+        class_id: str = None,
     ) -> List[RunResult]:
         strategy = strategy or BasicStrategy()
         capture_strategy = capture_strategy or AlwaysCaptureStrategy()
@@ -399,13 +487,21 @@ class Simulator:
 
         engine = RunEngine(self.config)
         return [
-            engine.play_run(strategy, capture_strategy, reward_strategy)
+            engine.play_run(strategy, capture_strategy, reward_strategy,
+                            class_id=class_id)
             for _ in range(num_runs)
         ]
 
-    def compare_strategies(self, num_runs: int = 1000) -> Dict[str, List[RunResult]]:
+    def compare_strategies(
+        self,
+        num_runs: int = 1000,
+        reward_strategy: RewardStrategy = None,
+        class_id: str = None,
+    ) -> Dict[str, List[RunResult]]:
         """Run every strategy and return {name: results}."""
         return {
-            s.name: self.run(num_runs, s)
+            s.name: self.run(num_runs, s,
+                             reward_strategy=reward_strategy,
+                             class_id=class_id)
             for s in ALL_STRATEGIES
         }

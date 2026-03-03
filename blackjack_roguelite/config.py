@@ -28,6 +28,9 @@ class DamageConfig:
     both_bust_damage: int = 0
     # Damage dealt when player folds a hand
     fold_damage: int = 1
+    # Player crit
+    player_crit_chance: float = 0.10
+    crit_multiplier: float = 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +38,7 @@ class DamageConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class PlayerConfig:
-    starting_hp: int = 95
+    starting_hp: int = 105
     max_companion_slots: int = 3
 
 
@@ -59,7 +62,7 @@ class RunConfig:
     fights_per_act: int = 3
     elites_per_act: int = 1
     # Boss is always the final fight of each act
-    heal_between_acts_pct: float = 0.35  # Heal 35% max HP between acts
+    heal_between_acts_pct: float = 0.42  # Heal 42% max HP between acts
     act_hp_multipliers: list = field(default_factory=lambda: [1.0, 1.3, 1.6])
 
 
@@ -146,84 +149,79 @@ DEFAULT_EXPERIENCE_TARGETS = [
         1.02, 1.15, "x",
     ),
     ExperienceTarget(
-        "split_rate",
-        "Pct of hands where player chooses split",
-        8, 25,
-    ),
-    ExperienceTarget(
         "counterplay_success_rate",
         "Pct of enemy chase scenarios where player avoids losing",
-        35, 65,
+        60, 72,
     ),
     ExperienceTarget(
         "reward_variety_rate",
         "Avg per-run reward-type variety (normalized)",
-        45, 75,
+        58, 72,
     ),
     ExperienceTarget(
         "build_pivot_rate",
         "Pct of runs with a meaningful reward-priority pivot mid-run",
-        20, 50,
+        48, 62,
     ),
     ExperienceTarget(
         "synergy_online_rate",
         "Pct of hands with 2+ simultaneous effect procs",
-        8, 25,
+        1.0, 5.0,
     ),
     ExperienceTarget(
         "early_spike_rate",
         "Pct of runs with an early spike in act 1",
-        55, 85,
+        62, 80,
     ),
     ExperienceTarget(
         "midrun_novelty_rate",
         "Pct of act 2+ fights introducing a not-seen-earlier enemy",
-        20, 45,
+        32, 42,
     ),
     ExperienceTarget(
         "companion_attachment_rate",
         "Pct of runs where a companion reaches level 3+",
-        20, 50,
+        55, 75,
     ),
     ExperienceTarget(
         "companion_meaningfulness",
         "Survival gap: >=2 companions captured vs <=1 companions",
-        8, 30, "pp",
+        14, 26, "pp",
     ),
     ExperienceTarget(
         "high_total_loss_rate",
         "Pct of non-bust 19+ player hands that still lose",
-        8, 22,
+        12, 18,
     ),
     ExperienceTarget(
         "enemy_hit_rate",
         "Enemy hit decisions as pct of total enemy decisions",
-        50, 68,
+        56, 62,
     ),
     ExperienceTarget(
         "enemy_chase_hit_rate",
         "Enemy chase hits (while not ahead) as pct of enemy hits",
-        35, 65,
+        50, 60,
     ),
     ExperienceTarget(
         "enemy_risk_hit_rate",
         "Enemy high-risk hits (>=35% bust odds) as pct of enemy hits",
-        45, 70,
+        54, 63,
     ),
     ExperienceTarget(
         "enemy_safe_stand_rate",
         "Enemy stands while ahead as pct of enemy stands",
-        45, 70,
+        54, 63,
     ),
     ExperienceTarget(
         "elite_chase_hit_rate",
         "Elite chase hits as pct of elite hits",
-        80, 99,
+        96.5, 99.2,
     ),
     ExperienceTarget(
         "boss_chase_hit_rate",
         "Boss chase hits as pct of boss hits",
-        80, 99,
+        96.0, 98.8,
     ),
 ]
 
@@ -265,7 +263,7 @@ ENEMY_TEMPLATES = {
         "hit_threshold": 17,
         "tier": "normal",
         "companion_type": "shadow_thief",
-        # High threshold IS its identity. Plays tight, rarely busts.
+        "crit_chance": 0.25,  # Plays tight, hits hard when it wins.
     },
     "turtle": {
         "name": "Turtle",
@@ -301,6 +299,15 @@ ENEMY_TEMPLATES = {
         "tier": "elite",
         "companion_type": "",
         "poison_per_hand": 1,  # Bleeds you every hand regardless.
+    },
+    "assassin": {
+        "name": "Assassin",
+        "hp": 9,
+        "hit_threshold": 17,
+        "tier": "elite",
+        "companion_type": "",
+        "crit_chance": 0.30,       # High crit rate.
+        "backstab_on_21": True,    # Guaranteed crit on exactly 21.
     },
 
     # --- Boss enemies ---
@@ -371,6 +378,67 @@ COMPANION_TEMPLATES = {
         "per_level": 0.05,
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Class templates (player identity / second progression lane)
+# ---------------------------------------------------------------------------
+CLASS_TEMPLATES = {
+    "thief": {
+        "name": "Thief",
+        "base_stats": {
+            "crit_chance": 0.08,
+            "crit_chance_high_hand": 0.08,
+        },
+        "talents": {
+            "precision":  {"name": "Precision",  "stat": "crit_chance",          "per_rank": 0.04, "max_ranks": 5},
+            "lethality":  {"name": "Lethality",  "stat": "crit_mult_bonus",      "per_rank": 0.15, "max_ranks": 5},
+            "evasion":    {"name": "Evasion",    "stat": "damage_reduction_pct",  "per_rank": 0.04, "max_ranks": 4},
+            "sleight":    {"name": "Sleight",    "stat": "max_folds_bonus",       "per_rank": 0.5,  "max_ranks": 4},
+        },
+    },
+    "warrior": {
+        "name": "Warrior",
+        "base_stats": {"damage_reduction_pct": 0.08, "max_hp_bonus": 10},
+        "talents": {
+            "strength":  {"name": "Strength",  "stat": "damage_pct",           "per_rank": 0.05, "max_ranks": 6},
+            "fortify":   {"name": "Fortify",   "stat": "damage_reduction_pct", "per_rank": 0.05, "max_ranks": 4},
+            "vitality":  {"name": "Vitality",  "stat": "max_hp_bonus",         "per_rank": 10,   "max_ranks": 5},
+            "grit":      {"name": "Grit",      "stat": "max_folds_bonus",      "per_rank": 0.5,  "max_ranks": 6},
+        },
+    },
+    "mage": {
+        "name": "Mage",
+        "base_stats": {"effect_power_pct": 0.10, "peek_always": True},
+        "talents": {
+            "spellpower":   {"name": "Spellpower",   "stat": "effect_power_pct",       "per_rank": 0.08, "max_ranks": 5},
+            "arcane_ward":  {"name": "Arcane Ward",   "stat": "bust_penalty_reduction", "per_rank": 0.05, "max_ranks": 5},
+            "focus":        {"name": "Focus",         "stat": "damage_pct",             "per_rank": 0.04, "max_ranks": 5},
+            "stabilize":    {"name": "Stabilize",     "stat": "unbust_bonus_chance",    "per_rank": 0.06, "max_ranks": 5},
+        },
+    },
+}
+
+_STAT_LABELS = {
+    "crit_chance":           lambda v: f"+{v:.0%} crit",
+    "crit_chance_high_hand": lambda v: f"+{v:.0%} crit on 18+",
+    "damage_reduction_pct":  lambda v: f"{v:.0%} damage reduction",
+    "max_hp_bonus":          lambda v: f"+{v} HP",
+    "effect_power_pct":      lambda v: f"+{v:.0%} effect power",
+    "peek_always":           lambda v: "always peek" if v else None,
+}
+
+
+def format_base_stats(base_stats: dict) -> str:
+    parts = []
+    for stat, value in base_stats.items():
+        fmt = _STAT_LABELS.get(stat)
+        if fmt is None:
+            continue
+        label = fmt(value)
+        if label is not None:
+            parts.append(label)
+    return ", ".join(parts)
 
 
 # ---------------------------------------------------------------------------

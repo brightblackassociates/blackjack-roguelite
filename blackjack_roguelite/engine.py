@@ -137,6 +137,9 @@ class Deck:
         return [(c, list(e)) for c, e in self._enchantments.items() if e]
 
 
+REWARD_TYPES = ["remove_card", "heal", "capture", "enchant", "fold_reward", "class_upgrade"]
+
+
 # ---------------------------------------------------------------------------
 # Companions
 # ---------------------------------------------------------------------------
@@ -160,6 +163,89 @@ class Companion:
         while self.xp >= xp_per_level and self.level < max_level:
             self.xp -= xp_per_level
             self.level += 1
+
+
+@dataclass
+class ClassStats:
+    damage_pct: float = 0.0
+    crit_chance: float = 0.0
+    crit_chance_high_hand: float = 0.0
+    crit_mult_bonus: float = 0.0
+    damage_reduction_pct: float = 0.0
+    max_hp_bonus: int = 0
+    max_folds_bonus: int = 0
+    effect_power_pct: float = 0.0
+    bust_penalty_reduction: float = 0.0
+    unbust_bonus_chance: float = 0.0
+    peek_always: bool = False
+
+
+def build_class_stats(class_id, talents=None) -> ClassStats:
+    """Build ClassStats from template base_stats + accumulated talent ranks."""
+    if class_id is None:
+        return ClassStats()
+    template = _cfg.CLASS_TEMPLATES[class_id]
+    base = template["base_stats"]
+    stats = ClassStats(
+        damage_pct=base.get("damage_pct", 0.0),
+        crit_chance=base.get("crit_chance", 0.0),
+        crit_chance_high_hand=base.get("crit_chance_high_hand", 0.0),
+        crit_mult_bonus=base.get("crit_mult_bonus", 0.0),
+        damage_reduction_pct=base.get("damage_reduction_pct", 0.0),
+        max_hp_bonus=base.get("max_hp_bonus", 0),
+        max_folds_bonus=base.get("max_folds_bonus", 0),
+        effect_power_pct=base.get("effect_power_pct", 0.0),
+        bust_penalty_reduction=base.get("bust_penalty_reduction", 0.0),
+        unbust_bonus_chance=base.get("unbust_bonus_chance", 0.0),
+        peek_always=base.get("peek_always", False),
+    )
+    if talents:
+        talent_defs = template["talents"]
+        for key, rank in talents.items():
+            if key in talent_defs and rank > 0:
+                td = talent_defs[key]
+                current = getattr(stats, td["stat"])
+                setattr(stats, td["stat"], current + td["per_rank"] * rank)
+    stats.max_folds_bonus = int(stats.max_folds_bonus)
+    stats.max_hp_bonus = int(stats.max_hp_bonus)
+    return stats
+
+
+def apply_talent_upgrade(player, talent_key) -> bool:
+    """Increment a talent rank, rebuild class_stats, apply deltas. Returns False if maxed."""
+    if player.class_id is None:
+        return False
+    template = _cfg.CLASS_TEMPLATES[player.class_id]
+    talent_def = template["talents"].get(talent_key)
+    if not talent_def:
+        return False
+    current_rank = player.class_talents.get(talent_key, 0)
+    if current_rank >= talent_def["max_ranks"]:
+        return False
+    old_hp = player.class_stats.max_hp_bonus
+    old_folds = player.class_stats.max_folds_bonus
+    player.class_talents[talent_key] = current_rank + 1
+    player.class_stats = build_class_stats(player.class_id, player.class_talents)
+    hp_delta = player.class_stats.max_hp_bonus - old_hp
+    if hp_delta > 0:
+        player.max_hp += hp_delta
+        player.hp += hp_delta
+    folds_delta = player.class_stats.max_folds_bonus - old_folds
+    if folds_delta > 0:
+        player.folds += folds_delta
+    return True
+
+
+def get_non_maxed_talents(player) -> List[str]:
+    """Return talent keys where current rank < max_ranks."""
+    if player.class_id is None:
+        return []
+    template = _cfg.CLASS_TEMPLATES[player.class_id]
+    result = []
+    for key, td in template["talents"].items():
+        if player.class_talents.get(key, 0) < td["max_ranks"]:
+            result.append(key)
+    return result
 
 
 def check_activation(cards: List[Card], activation: str) -> bool:
@@ -208,6 +294,9 @@ class Enemy:
     rage_per_hand: int = 0         # bonus_damage grows by this each hand
     poison_per_hand: int = 0       # Flat damage to player every hand
     drain: bool = False            # Heal for damage dealt on wins
+    crit_chance: float = 0.0       # Chance to crit on wins
+    crit_multiplier: float = 1.5   # Crit damage multiplier
+    backstab_on_21: bool = False   # Guaranteed crit when enemy hand is exactly 21
 
     @property
     def alive(self) -> bool:
@@ -225,6 +314,9 @@ class Player:
     max_companion_slots: int = 3
     gold: int = 0
     folds: int = 0
+    class_id: Optional[str] = None
+    class_stats: ClassStats = field(default_factory=ClassStats)
+    class_talents: Dict[str, int] = field(default_factory=dict)
 
     @property
     def alive(self) -> bool:
@@ -243,8 +335,16 @@ class Player:
             if c.effect_type == effect_type:
                 if cards is not None and not check_activation(cards, c.activation):
                     return None
-                return c.effect_value
+                value = c.effect_value
+                if self.class_stats.effect_power_pct and effect_type != "peek_enemy":
+                    value *= (1 + self.class_stats.effect_power_pct)
+                return value
         return None
+
+    def has_peek(self, cards=None):
+        if self.class_stats.peek_always:
+            return True
+        return self.get_companion_effect("peek_enemy", cards) is not None
 
     def can_capture(self) -> bool:
         return len(self.companions) < self.max_companion_slots
@@ -310,6 +410,8 @@ class RunResult:
     enchantments_applied: int = 0
     fold_rewards: int = 0
     rewards_chosen: List[str] = field(default_factory=list)
+    class_upgrades: int = 0
+    class_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +495,10 @@ class CombatEngine:
                     telemetry["hits"] += 1
                     enemy_cards.append(self.deck.draw())
                     continue
-                if p_val and e_val <= p_val and e_val < 20 and bust_prob <= tolerance - 0.04:
+                chase_tol = tolerance - 0.01
+                if p_val >= 19:
+                    chase_tol += 0.03
+                if p_val and e_val <= p_val and e_val < 20 and bust_prob <= chase_tol:
                     telemetry["chase_hits"] += 1
                     if bust_prob >= 0.35:
                         telemetry["risk_hits"] += 1
@@ -418,7 +523,6 @@ class CombatEngine:
 
     def _play_one_sub_hand(self, sub_cards, enemy, strategy, player):
         """Play a single sub-hand (hit/stand loop, no fold). Returns (cards, busted, p_val, decisions)."""
-        peek = player.get_companion_effect("peek_enemy", sub_cards)
         # Sub-hands don't see enemy cards -- just use card[0] value
         visible_enemy = 0  # not relevant for sub-hand decisions
         forced_hits = enemy.forced_extra_hits
@@ -428,8 +532,10 @@ class CombatEngine:
         while True:
             val = hand_value(sub_cards)
             if val > 21:
-                unbust = player.get_companion_effect("unbust_chance", sub_cards)
-                if unbust and random.random() < unbust:
+                unbust = (player.get_companion_effect("unbust_chance", sub_cards) or 0.0) \
+                         + player.class_stats.unbust_bonus_chance
+                unbust = min(unbust, 0.80)
+                if unbust > 0 and random.random() < unbust:
                     sub_cards.pop()
                     continue
                 busted = True
@@ -453,21 +559,22 @@ class CombatEngine:
 
         return sub_cards, busted, hand_value(sub_cards), decisions
 
-    def _resolve_sub_hand(self, p_val, e_val, player_busted, enemy_busted, player_cards, player):
+    def _resolve_sub_hand(self, p_val, e_val, player_busted, enemy_busted, player_cards, player, enemy=None):
         """Resolve one sub-hand vs enemy. Returns (damage_dealt, damage_taken, outcome)."""
         companion_effects = []
         if player_busted:
-            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards)
-            dmg *= self.config.damage.bust_penalty_multiplier
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards, enemy=enemy)
+            effective_bust = max(1.0, self.config.damage.bust_penalty_multiplier - player.class_stats.bust_penalty_reduction)
+            dmg *= effective_bust
             return 0, dmg, "lose"
         if enemy_busted:
-            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards)
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards, enemy=enemy)
             return dmg, 0, "win"
         if p_val > e_val:
-            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards)
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards, enemy=enemy)
             return dmg, 0, "win"
         if e_val > p_val:
-            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards)
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards, enemy=enemy)
             return 0, dmg, "lose"
         return 0, 0, "push"
 
@@ -491,8 +598,8 @@ class CombatEngine:
         enemy_busted = e_val > 21
 
         # Resolve each sub-hand
-        dealt_a, taken_a, out_a = self._resolve_sub_hand(val_a, e_val, busted_a, enemy_busted, hand_a, player)
-        dealt_b, taken_b, out_b = self._resolve_sub_hand(val_b, e_val, busted_b, enemy_busted, hand_b, player)
+        dealt_a, taken_a, out_a = self._resolve_sub_hand(val_a, e_val, busted_a, enemy_busted, hand_a, player, enemy)
+        dealt_b, taken_b, out_b = self._resolve_sub_hand(val_b, e_val, busted_b, enemy_busted, hand_b, player, enemy)
 
         # Build sub-hand results for tracking
         sub_a = HandResult(
@@ -574,7 +681,7 @@ class CombatEngine:
                 )
             if p_natural:
                 dmg = self._damage_dealt(p_val, e_val, True, player, companion_effects,
-                                         player_cards)
+                                         player_cards, enemy=enemy)
                 return HandResult(
                     player_cards, enemy_cards, p_val, e_val,
                     False, False, True, False, dmg, 0, "win",
@@ -582,7 +689,7 @@ class CombatEngine:
                 )
             # Enemy natural
             dmg = self._damage_taken(e_val, p_val, True, player, companion_effects,
-                                     player_cards)
+                                     player_cards, enemy=enemy)
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 False, False, False, True, 0, dmg, "lose",
@@ -598,8 +705,7 @@ class CombatEngine:
             return self._play_split_hand(player, enemy, player_cards, enemy_cards, strategy)
 
         # --- What the player can see ---
-        peek = player.get_companion_effect("peek_enemy", player_cards)
-        if peek:
+        if player.has_peek(player_cards):
             visible_enemy = hand_value(enemy_cards)
         else:
             visible_enemy = enemy_cards[0].value
@@ -611,11 +717,13 @@ class CombatEngine:
         while True:
             p_val = hand_value(player_cards)
             if p_val > 21:
-                # Try unbust companion
-                unbust = player.get_companion_effect("unbust_chance", player_cards)
-                if unbust and random.random() < unbust:
+                # Try unbust (companion + class bonus)
+                unbust = (player.get_companion_effect("unbust_chance", player_cards) or 0.0) \
+                         + player.class_stats.unbust_bonus_chance
+                unbust = min(unbust, 0.80)
+                if unbust > 0 and random.random() < unbust:
                     player_cards.pop()
-                    companion_effects.append("Goblin Shaman: unbusted!")
+                    companion_effects.append("Unbusted!")
                     highlights.append("companion_save")
                     continue
                 player_busted = True
@@ -666,8 +774,9 @@ class CombatEngine:
         # --- Resolve ---
         if player_busted:
             dmg = self._damage_taken(e_val, p_val, False, player, companion_effects,
-                                     player_cards)
-            dmg *= self.config.damage.bust_penalty_multiplier
+                                     player_cards, enemy=enemy)
+            effective_bust = max(1.0, self.config.damage.bust_penalty_multiplier - player.class_stats.bust_penalty_reduction)
+            dmg *= effective_bust
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 True, False, False, False, 0, dmg, "lose",
@@ -676,7 +785,7 @@ class CombatEngine:
 
         if enemy_busted:
             dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects,
-                                     player_cards)
+                                     player_cards, enemy=enemy)
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 False, True, False, False, dmg, 0, "win",
@@ -687,11 +796,11 @@ class CombatEngine:
         # Neither busted: compare values
         if p_val > e_val:
             dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects,
-                                     player_cards)
+                                     player_cards, enemy=enemy)
             outcome = "win"
         elif e_val > p_val:
             dmg = self._damage_taken(e_val, p_val, False, player, companion_effects,
-                                     player_cards)
+                                     player_cards, enemy=enemy)
             outcome = "lose"
         else:
             outcome = "push"
@@ -735,7 +844,7 @@ class CombatEngine:
         return float(max(winner_val - cfg.damage_subtract, 1))
 
     def _damage_dealt(self, p_val, e_val, is_natural, player, effects_log,
-                      player_cards=None):
+                      player_cards=None, enemy=None):
         damage = self._base_damage(p_val, e_val)
 
         if is_natural:
@@ -757,14 +866,36 @@ class CombatEngine:
             damage *= imp_mult
             effects_log.append(f"Fire Imp: {imp_mult:.2f}x damage")
 
+        # Class damage bonus
+        if player.class_stats.damage_pct:
+            damage *= (1 + player.class_stats.damage_pct)
+
+        # Player crit (base + class bonus + high-hand conditional)
+        crit_chance = self.config.damage.player_crit_chance + player.class_stats.crit_chance
+        if player_cards and hand_value(player_cards) >= 18:
+            crit_chance += player.class_stats.crit_chance_high_hand
+        if random.random() < crit_chance:
+            crit_mult = self.config.damage.crit_multiplier * (1 + player.class_stats.crit_mult_bonus)
+            damage *= crit_mult
+            effects_log.append(f"CRIT! x{crit_mult:.1f}")
+
         return damage
 
     def _damage_taken(self, e_val, p_val, is_natural, player, effects_log,
-                      player_cards=None):
+                      player_cards=None, enemy=None):
         damage = self._base_damage(e_val, p_val)
 
         if is_natural:
             damage *= self.config.damage.natural_21_multiplier
+
+        # Enemy crit / backstab
+        if enemy:
+            if enemy.backstab_on_21 and e_val == 21:
+                damage *= enemy.crit_multiplier
+                effects_log.append(f"BACKSTAB! x{enemy.crit_multiplier:.1f}")
+            elif enemy.crit_chance > 0 and random.random() < enemy.crit_chance:
+                damage *= enemy.crit_multiplier
+                effects_log.append(f"Enemy CRIT! x{enemy.crit_multiplier:.1f}")
 
         # Shield Turtle: percentage damage reduction (needs activation condition)
         reduction_pct = player.get_companion_effect("damage_reduction_pct", player_cards)
@@ -772,6 +903,11 @@ class CombatEngine:
             reduced = damage * reduction_pct
             damage = max(0, damage - reduced)
             effects_log.append(f"Shield Turtle: -{reduction_pct*100:.0f}% ({reduced:.0f} blocked)")
+
+        # Class damage reduction (multiplicative with Shield Turtle, capped 0.35)
+        if player.class_stats.damage_reduction_pct:
+            class_dr = min(player.class_stats.damage_reduction_pct, 0.35)
+            damage *= (1 - class_dr)
 
         return damage
 
@@ -787,7 +923,7 @@ class CombatEngine:
             total += base * diminishing
         return total
 
-    def _finalize_hand(self, result: HandResult) -> HandResult:
+    def _finalize_hand(self, result: HandResult, player: Player = None) -> HandResult:
         """Apply enchantment effects from player's cards to a resolved hand."""
         if result.outcome == "fold":
             return result
@@ -803,18 +939,22 @@ class CombatEngine:
                 elif ench == "ward":
                     ward_count += 1
 
+        ep_mult = 1.0
+        if player and player.class_stats.effect_power_pct:
+            ep_mult = 1 + player.class_stats.effect_power_pct
+
         if fury_count > 0 and result.outcome == "win":
-            bonus = self._ench_total(cfg.fury_damage, fury_count, cfg.diminishing)
+            bonus = self._ench_total(cfg.fury_damage, fury_count, cfg.diminishing) * ep_mult
             result.damage_dealt += bonus
             result.companion_effects.append(f"Fury x{fury_count}: +{bonus:.0f} dmg")
 
         if ward_count > 0 and result.outcome == "lose":
-            reduction = self._ench_total(cfg.ward_reduction, ward_count, cfg.diminishing)
+            reduction = self._ench_total(cfg.ward_reduction, ward_count, cfg.diminishing) * ep_mult
             result.damage_taken = max(0, result.damage_taken - reduction)
             result.companion_effects.append(f"Ward x{ward_count}: -{reduction:.0f} dmg")
 
         if siphon_count > 0:
-            heal = int(self._ench_total(cfg.siphon_heal, siphon_count, cfg.diminishing))
+            heal = int(self._ench_total(cfg.siphon_heal, siphon_count, cfg.diminishing) * ep_mult)
             result.siphon_heal = heal
             result.companion_effects.append(f"Siphon x{siphon_count}: heal {heal}")
 
@@ -829,7 +969,7 @@ class CombatEngine:
 
         while player.alive and enemy.alive:
             result = self.play_hand(player, enemy, strategy)
-            result = self._finalize_hand(result)
+            result = self._finalize_hand(result, player)
 
             # --- Fold: take fold_damage, but poison/rage still tick ---
             if result.outcome == "fold":
@@ -967,17 +1107,26 @@ class RunEngine:
             rage_per_hand=t.get("rage_per_hand", 0),
             poison_per_hand=t.get("poison_per_hand", 0),
             drain=t.get("drain", False),
+            crit_chance=t.get("crit_chance", 0.0),
+            backstab_on_21=t.get("backstab_on_21", False),
         )
 
-    def play_run(self, strategy, capture_strategy, reward_strategy=None) -> RunResult:
+    def play_run(self, strategy, capture_strategy, reward_strategy=None,
+                 class_id=None) -> RunResult:
         # Fresh deck each run so template modifications don't carry over
         self.combat.deck = Deck()
 
+        class_stats = build_class_stats(class_id)
+        base_hp = self.config.player.starting_hp + class_stats.max_hp_bonus
+        base_folds = self.config.fold.starting_folds + class_stats.max_folds_bonus
         player = Player(
-            hp=self.config.player.starting_hp,
-            max_hp=self.config.player.starting_hp,
+            hp=base_hp,
+            max_hp=base_hp,
             max_companion_slots=self.config.player.max_companion_slots,
-            folds=self.config.fold.starting_folds,
+            folds=base_folds,
+            class_id=class_id,
+            class_stats=class_stats,
+            class_talents={},
         )
 
         encounters = self._generate_encounters()
@@ -986,6 +1135,7 @@ class RunEngine:
         cards_removed = 0
         enchantments_applied = 0
         fold_rewards = 0
+        class_upgrades = 0
         rewards_chosen = []
 
         for enemy_key, act in encounters:
@@ -1019,6 +1169,9 @@ class RunEngine:
                     1, self.config.enchantment.max_per_card
                 ))
 
+                non_maxed = get_non_maxed_talents(player)
+                can_class_upgrade = bool(non_maxed) and player.class_id is not None
+
                 choice = reward_strategy.choose_reward(
                     player, self.combat.deck, enemy,
                     can_remove=can_remove,
@@ -1027,6 +1180,7 @@ class RunEngine:
                     can_capture=can_capture,
                     can_enchant=can_enchant,
                     can_fold_reward=True,
+                    can_class_upgrade=can_class_upgrade,
                 )
 
                 if choice == "remove_card":
@@ -1078,6 +1232,10 @@ class RunEngine:
                             )
                             player.companions.append(comp)
                             result.companion_captured = enemy.companion_type
+                elif choice == "class_upgrade" and can_class_upgrade:
+                    talent_key = reward_strategy.choose_class_talent(player)
+                    if talent_key and apply_talent_upgrade(player, talent_key):
+                        class_upgrades += 1
 
                 result.reward_chosen = choice
                 rewards_chosen.append(choice)
@@ -1099,4 +1257,6 @@ class RunEngine:
             enchantments_applied=enchantments_applied,
             fold_rewards=fold_rewards,
             rewards_chosen=rewards_chosen,
+            class_upgrades=class_upgrades,
+            class_id=class_id,
         )

@@ -11,9 +11,10 @@ import time
 import tty
 import termios
 
-from .config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES
+from .config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES, CLASS_TEMPLATES, format_base_stats
 from .engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
-                     RARITY_BUFFS, RARITY_WEIGHTS, RANKS, check_activation)
+                     RARITY_BUFFS, RARITY_WEIGHTS, RANKS, check_activation,
+                     build_class_stats)
 
 
 # --- ANSI color for enemy rarity ---
@@ -191,6 +192,8 @@ ABILITY_HINTS = {
     "poison_per_hand": "Poison -- {v} damage every hand, win or lose",
     "drain": "Drain -- heals when it hurts you",
     "forced_extra_hits": "Inferno -- forces you to hit {v} extra time(s)",
+    "crit_chance": "Crit -- {v:.0%} chance to deal extra damage",
+    "backstab_on_21": "Backstab -- guaranteed crit on 21",
 }
 
 
@@ -204,6 +207,8 @@ def describe_abilities(enemy):
         ("poison_per_hand", enemy.poison_per_hand),
         ("drain", int(enemy.drain)),
         ("forced_extra_hits", enemy.forced_extra_hits),
+        ("crit_chance", enemy.crit_chance),
+        ("backstab_on_21", int(enemy.backstab_on_21)),
     ]
     for key, val in fields:
         if val:
@@ -332,6 +337,8 @@ class Game:
         print(f"    Poison: flat damage every hand, win or lose")
         print(f"    Drain: heals when it hurts you")
         print(f"    Inferno: forces you to hit extra")
+        print(f"    Crit: chance to deal {self.config.damage.crit_multiplier:.1f}x damage")
+        print(f"    Backstab: guaranteed crit when hand is exactly 21")
         print()
         pause()
 
@@ -436,6 +443,10 @@ class Game:
             parts.append(f"reckless {enemy.reckless_extra}")
         if enemy.forced_extra_hits:
             parts.append(f"inferno {enemy.forced_extra_hits}")
+        if enemy.crit_chance > 0:
+            parts.append(f"crit {enemy.crit_chance:.0%}")
+        if enemy.backstab_on_21:
+            parts.append("backstab")
         return "  ".join(parts)
 
     def _print_decision_hud(self, p_val, player_cards, enemy, bust_pct, deck_ct):
@@ -514,6 +525,8 @@ class Game:
             rage_per_hand=t.get("rage_per_hand", 0),
             poison_per_hand=t.get("poison_per_hand", 0),
             drain=t.get("drain", False),
+            crit_chance=t.get("crit_chance", 0.0),
+            backstab_on_21=t.get("backstab_on_21", False),
         )
 
     # --- Display helpers ---
@@ -586,6 +599,10 @@ class Game:
             abilities.append(f"  Drain: heals on hit")
         if enemy.forced_extra_hits:
             abilities.append(f"  Inferno: forces {enemy.forced_extra_hits} extra hit(s)")
+        if enemy.crit_chance > 0:
+            abilities.append(f"  Crit: {enemy.crit_chance:.0%} chance for {enemy.crit_multiplier:.1f}x damage")
+        if enemy.backstab_on_21:
+            abilities.append(f"  Backstab: guaranteed crit on 21")
         if enemy.bonus_damage and not enemy.rage_per_hand:
             abilities.append(f"  Bonus damage: +{enemy.bonus_damage}")
 
@@ -737,8 +754,8 @@ class Game:
             print(f"  {C_BRED}Enemy natural 21!{C_RESET}")
             beat(0.4)
             php_b = self.player.hp
-            dmg = self._calc_loss_damage(21, hand_value(player_cards), is_natural=True,
-                                         player_cards=player_cards, bonus_damage=enemy.bonus_damage)
+            dmg = self._calc_loss_damage(21, hand_value(player_cards), enemy, is_natural=True,
+                                         player_cards=player_cards)
             self.hurt_player(dmg)
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
@@ -1152,8 +1169,8 @@ class Game:
             if label:
                 beat(0.3)
                 print(f"  {C_RED}{prefix}Bust!{C_RESET} ({p_val})")
-            dmg = self._calc_loss_damage(e_val, p_val, is_bust=True,
-                                         player_cards=player_cards, bonus_damage=enemy.bonus_damage)
+            dmg = self._calc_loss_damage(e_val, p_val, enemy, is_bust=True,
+                                         player_cards=player_cards)
             self.hurt_player(dmg)
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
@@ -1174,8 +1191,7 @@ class Game:
         elif e_val > p_val:
             print(f"  {C_RED}{prefix}You lose.{C_RESET} {p_val} vs {e_val}")
             beat(0.15)
-            dmg = self._calc_loss_damage(e_val, p_val, player_cards=player_cards,
-                                         bonus_damage=enemy.bonus_damage)
+            dmg = self._calc_loss_damage(e_val, p_val, enemy, player_cards=player_cards)
             self.hurt_player(dmg)
             if enemy.drain:
                 self._apply_drain(enemy, dmg)
@@ -1217,10 +1233,14 @@ class Game:
                 fury_bonus = self._ench_total(self.config.enchantment.fury_damage, ench["fury"])
                 dmg += fury_bonus
                 print(f"  {C_CYAN}+{fury_bonus:.0f} Fury x{ench['fury']} -> {dmg:.0f}{C_RESET}")
+        # Player crit
+        if random.random() < self.config.damage.player_crit_chance:
+            dmg *= self.config.damage.crit_multiplier
+            print(f"  {C_BGREEN}CRIT! x{self.config.damage.crit_multiplier:.1f} -> {dmg:.0f}{C_RESET}")
         return dmg
 
-    def _calc_loss_damage(self, e_val, p_val, is_natural=False, is_bust=False,
-                          player_cards=None, bonus_damage=0):
+    def _calc_loss_damage(self, e_val, p_val, enemy, is_natural=False, is_bust=False,
+                          player_cards=None):
         cfg = self.config.damage
         if cfg.model == "differential":
             base = float(max(e_val - p_val, cfg.damage_floor))
@@ -1229,6 +1249,13 @@ class Game:
             base = float(max(e_val - cfg.damage_subtract, 1))
             print(f"  {C_DIM}{e_val} - {cfg.damage_subtract} = {base:.0f}{C_RESET}")
         dmg = base
+        # Enemy crit / backstab
+        if enemy.backstab_on_21 and e_val == 21:
+            dmg *= enemy.crit_multiplier
+            print(f"  {C_BRED}BACKSTAB! x{enemy.crit_multiplier:.1f} -> {dmg:.0f}{C_RESET}")
+        elif enemy.crit_chance > 0 and random.random() < enemy.crit_chance:
+            dmg *= enemy.crit_multiplier
+            print(f"  {C_RED}CRIT! x{enemy.crit_multiplier:.1f} -> {dmg:.0f}{C_RESET}")
         if is_bust:
             dmg *= cfg.bust_penalty_multiplier
             print(f"  {C_DIM}x{cfg.bust_penalty_multiplier:.1f} bust -> {dmg:.0f}{C_RESET}")
@@ -1246,9 +1273,9 @@ class Game:
                 ward_red = self._ench_total(self.config.enchantment.ward_reduction, ench["ward"])
                 dmg = max(0, dmg - ward_red)
                 print(f"  {C_CYAN}-{ward_red:.0f} Ward x{ench['ward']} -> {dmg:.0f}{C_RESET}")
-        if bonus_damage > 0:
-            dmg += bonus_damage
-            print(f"  {C_DIM}+{bonus_damage} rage -> {dmg:.0f}{C_RESET}")
+        if enemy.bonus_damage > 0:
+            dmg += enemy.bonus_damage
+            print(f"  {C_DIM}+{enemy.bonus_damage} rage -> {dmg:.0f}{C_RESET}")
         return dmg
 
     def _apply_drain(self, enemy, dmg):
@@ -1608,6 +1635,39 @@ class Game:
         self.show_status()
         pause()
 
+    # --- Class selection ---
+
+    def _pick_class(self):
+        entries = list(CLASS_TEMPLATES.items())
+        valid = {}
+        labels = {}
+        clear()
+        print()
+        print(f"  {C_BWHITE}Choose your class:{C_RESET}")
+        print()
+        for i, (cid, tmpl) in enumerate(entries, 1):
+            desc = format_base_stats(tmpl["base_stats"])
+            key = str(i)
+            valid[key] = cid
+            labels[key] = tmpl["name"]
+            print(f"    {C_BWHITE}{i}.{C_RESET} {tmpl['name']:<8} {C_DIM}--{C_RESET} {desc}")
+        no_class_key = str(len(entries) + 1)
+        valid[no_class_key] = None
+        labels[no_class_key] = "No class"
+        print(f"    {C_BWHITE}{no_class_key}.{C_RESET} No class")
+        print()
+
+        choice = prompt_choice("", list(valid.keys()), labels)
+        class_id = valid[choice]
+
+        if class_id:
+            self.player.class_id = class_id
+            self.player.class_stats = build_class_stats(class_id)
+            hp_bonus = self.player.class_stats.max_hp_bonus
+            if hp_bonus > 0:
+                self.player.max_hp += hp_bonus
+                self.player.hp += hp_bonus
+
     # --- Main loop ---
 
     def run(self):
@@ -1629,6 +1689,9 @@ class Game:
         print("  Controls: \u2192 hit, \u2190 stand, \u2193 fold, \u2191 info, r rules")
         print()
         pause()
+
+        # --- Class selection ---
+        self._pick_class()
 
         encounters = self.generate_encounters()
         current_act = -1

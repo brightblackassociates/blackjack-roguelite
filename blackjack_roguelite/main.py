@@ -11,16 +11,37 @@ Usage:
 """
 import argparse
 import time
+from typing import Optional
 
-from .config import GameConfig
+from .config import GameConfig, CLASS_TEMPLATES, format_base_stats
 from .simulate import (
     Simulator, STRATEGIES_BY_NAME,
     NeverCaptureStrategy, AlwaysCaptureStrategy,
+    ClassAwareRewardStrategy, SmartRewardStrategy,
 )
 from .analyze import (
     compute_metrics, evaluate_targets,
     generate_recommendations, print_report,
 )
+
+
+def _pick_class() -> Optional[str]:
+    entries = list(CLASS_TEMPLATES.items())
+    print("\nChoose your class:")
+    for i, (cid, tmpl) in enumerate(entries, 1):
+        desc = format_base_stats(tmpl["base_stats"])
+        print(f"  {i}. {tmpl['name']:<8} -- {desc}")
+    print(f"  {len(entries) + 1}. No class")
+
+    while True:
+        try:
+            choice = int(input("> "))
+        except (ValueError, EOFError):
+            continue
+        if choice == len(entries) + 1:
+            return None
+        if 1 <= choice <= len(entries):
+            return entries[choice - 1][0]
 
 
 def main():
@@ -43,7 +64,16 @@ def main():
         "--no-companions", action="store_true",
         help="Disable companion capture",
     )
+    parser.add_argument(
+        "--class-id",
+        choices=["thief", "warrior", "mage"],
+        default=None,
+        help="Player class (thief/warrior/mage)",
+    )
     args = parser.parse_args()
+
+    if args.class_id is None:
+        args.class_id = _pick_class()
 
     config = GameConfig()
     capture_strat = AlwaysCaptureStrategy()
@@ -55,10 +85,14 @@ def main():
     sim = Simulator(config)
     strategy = STRATEGIES_BY_NAME[args.strategy]
 
+    reward_strat = ClassAwareRewardStrategy() if args.class_id else SmartRewardStrategy()
+    class_label = f" [{args.class_id}]" if args.class_id else ""
+
     # --- Main simulation ---
     t0 = time.time()
-    print(f"Running {args.runs} simulations with '{strategy.name}' strategy...")
-    results = sim.run(args.runs, strategy, capture_strat)
+    print(f"Running {args.runs} simulations with '{strategy.name}' strategy{class_label}...")
+    results = sim.run(args.runs, strategy, capture_strat,
+                      reward_strategy=reward_strat, class_id=args.class_id)
     metrics = compute_metrics(results, config)
     target_results = evaluate_targets(metrics, config.experience_targets)
     elapsed = time.time() - t0
@@ -68,7 +102,9 @@ def main():
     strategy_comparison = None
     if args.compare:
         print("Comparing all strategies...")
-        all_results = sim.compare_strategies(args.runs)
+        all_results = sim.compare_strategies(args.runs,
+                                                reward_strategy=reward_strat,
+                                                class_id=args.class_id)
         strategy_comparison = {}
         for sname, sresults in all_results.items():
             sm = compute_metrics(sresults, config)
@@ -79,7 +115,9 @@ def main():
         nc_config = GameConfig()
         nc_config.companion.capture_chance = 0.0
         nc_sim = Simulator(nc_config)
-        nc_results = nc_sim.run(args.runs, strategy, NeverCaptureStrategy())
+        nc_results = nc_sim.run(args.runs, strategy, NeverCaptureStrategy(),
+                                reward_strategy=reward_strat,
+                                class_id=args.class_id)
         nc_metrics = compute_metrics(nc_results, config)
 
         if nc_metrics["avg_damage_dealt"] > 0:

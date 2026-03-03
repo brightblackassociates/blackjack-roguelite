@@ -4,7 +4,7 @@ Metrics computation, experience quality evaluation, and reporting.
 from collections import Counter
 from typing import List, Dict
 from .config import GameConfig, ExperienceTarget
-from .engine import RunResult
+from .engine import RunResult, REWARD_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def compute_metrics(results: List[RunResult], config: GameConfig) -> Dict:
         run_early_spike = False
         rewards = [r for r in run.rewards_chosen if r]
         if rewards:
-            reward_variety_samples.append(len(set(rewards)) / 5.0)
+            reward_variety_samples.append(len(set(rewards)) / len(REWARD_TYPES))
         else:
             reward_variety_samples.append(0.0)
 
