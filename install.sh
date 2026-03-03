@@ -8,11 +8,15 @@ REPO_ZIP="https://github.com/brightblackassociates/blackjack-roguelite/archive/r
 INSTALL_DIR="$HOME/.blackjack-roguelite"
 BIN_LINK="/usr/local/bin/blackjack"
 
-# Check for python3
-if ! command -v python3 &>/dev/null; then
+# Check for a working python3 (macOS ships a shim that just triggers Xcode CLT install)
+if ! python3 -c "import sys" &>/dev/null; then
     echo ""
-    echo "  Python 3 is required but not found."
-    echo "  Install it: https://www.python.org/downloads/"
+    echo "  Python 3 is required but not installed."
+    echo ""
+    echo "  Easiest fix: install Xcode Command Line Tools:"
+    echo "    xcode-select --install"
+    echo ""
+    echo "  Or grab Python directly: https://www.python.org/downloads/"
     echo ""
     exit 1
 fi
