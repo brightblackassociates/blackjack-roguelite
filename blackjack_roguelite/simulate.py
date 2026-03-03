@@ -4,7 +4,7 @@ Simulation harness: player strategies, capture strategies, reward strategies, ba
 import random
 from typing import List, Dict
 
-from .config import GameConfig, CLASS_TEMPLATES
+from .config import GameConfig, CLASS_TEMPLATES, COMPANION_TEMPLATES
 from .engine import hand_value, RunEngine, RunResult, Companion, get_non_maxed_talents
 
 
@@ -237,6 +237,30 @@ class RewardStrategy:
         non_maxed = get_non_maxed_talents(player)
         return random.choice(non_maxed) if non_maxed else None
 
+    def should_swap_for_capture(self, player, incoming_companion_type):
+        """Whether to replace an existing companion when slots are full."""
+        tmpl = COMPANION_TEMPLATES.get(incoming_companion_type)
+        if not tmpl:
+            return False
+        incoming_effect = tmpl["effect_type"]
+        current_effects = {c.effect_type for c in player.companions}
+        # Prefer swaps only when incoming effect adds new tactical coverage.
+        return incoming_effect not in current_effects
+
+    def choose_companion_to_release(self, player, incoming_companion_type):
+        """Pick index of companion to release, or None to decline replacement."""
+        if not player.companions:
+            return None
+
+        effects = [c.effect_type for c in player.companions]
+        dupe_idxs = [
+            i for i, c in enumerate(player.companions)
+            if effects.count(c.effect_type) > 1
+        ]
+        if dupe_idxs:
+            return min(dupe_idxs, key=lambda i: (player.companions[i].level, i))
+        return min(range(len(player.companions)), key=lambda i: (player.companions[i].level, i))
+
     def choose_rank_to_remove(self, removable_ranks, rank_counts):
         """Pick which rank to remove from the deck."""
         raise NotImplementedError
@@ -267,8 +291,9 @@ class SmartRewardStrategy(RewardStrategy):
                       can_fold_reward=False, can_class_upgrade=False):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
-        # Capture remains high-value, but reserve one slot for build flexibility.
-        if can_capture and player.can_capture() and len(player.companions) < 2:
+        # Capture remains high-value early, now based on roster depth.
+        roster_size = player.total_companions() if hasattr(player, "total_companions") else len(player.companions)
+        if can_capture and roster_size < 3 and hp_pct > 0.55:
             return "capture"
 
         # Replenish folds only when empty to avoid starving deck progression.
@@ -335,7 +360,9 @@ class HealFirstRewardStrategy(RewardStrategy):
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
                       can_fold_reward=False, can_class_upgrade=False):
-        if can_capture and player.can_capture():
+        if can_capture and (
+            player.can_capture() or self.should_swap_for_capture(player, enemy.companion_type)
+        ):
             return "capture"
         if can_heal:
             return "heal"
@@ -363,7 +390,9 @@ class RemoveFirstRewardStrategy(RewardStrategy):
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
                       can_fold_reward=False, can_class_upgrade=False):
-        if can_capture and player.can_capture():
+        if can_capture and (
+            player.can_capture() or self.should_swap_for_capture(player, enemy.companion_type)
+        ):
             return "capture"
         if can_remove:
             return "remove_card"
@@ -405,7 +434,8 @@ class ClassAwareRewardStrategy(SmartRewardStrategy):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
         # Capture still high-value early
-        if can_capture and player.can_capture() and len(player.companions) < 2:
+        roster_size = player.total_companions() if hasattr(player, "total_companions") else len(player.companions)
+        if can_capture and roster_size < 3 and hp_pct > 0.55:
             return "capture"
 
         # Sustain: HP critically low

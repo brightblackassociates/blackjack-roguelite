@@ -47,7 +47,29 @@ class PlayerConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class CompanionConfig:
-    capture_chance: float = 0.60       # Chance capture succeeds when attempted
+    capture_chance: float = 0.42       # Base chance capture succeeds when attempted
+    # Rarity multipliers: rarer Shades are harder to capture.
+    capture_rarity_chance_mult: dict[str, float] = field(default_factory=lambda: {
+        "common": 1.00,
+        "rare": 0.70,
+        "elite": 0.50,
+        "epic": 0.35,
+    })
+    # Rarity multipliers: rarer captured Shades have stronger effects.
+    capture_rarity_power_mult: dict[str, float] = field(default_factory=lambda: {
+        "common": 1.00,
+        "rare": 1.08,
+        "elite": 1.16,
+        "epic": 1.24,
+    })
+    # Per-encounter roll range by rarity; this creates individual shade variance
+    # within the same shade type (e.g., weak/common Sable vs high-roll Sable).
+    capture_roll_range_by_rarity: dict[str, tuple[float, float]] = field(default_factory=lambda: {
+        "common": (0.97, 1.03),
+        "rare": (0.98, 1.08),
+        "elite": (0.98, 1.10),
+        "epic": (0.99, 1.03),
+    })
     xp_per_fight: int = 10            # XP gained per fight participated in
     xp_per_level: int = 30            # XP needed to level up
     max_level: int = 5
@@ -240,92 +262,100 @@ DEFAULT_EXPERIENCE_TARGETS = [
 #   drain             - enemy heals for damage dealt when it wins
 # ---------------------------------------------------------------------------
 ENEMY_TEMPLATES = {
-    # --- Normal enemies (capturable) ---
-    "imp": {
-        "name": "Imp",
-        "hp": 4,
-        "hit_threshold": 15,
-        "tier": "normal",
-        "companion_type": "fire_imp",
-        # No ability. Simple starter enemy.
-    },
-    "goblin": {
-        "name": "Goblin",
-        "hp": 5,
-        "hit_threshold": 16,
-        "tier": "normal",
-        "companion_type": "goblin_shaman",
-        "reckless_extra": 1,  # Hits one extra time. More volatile.
-    },
-    "thief": {
-        "name": "Thief",
+    # --- Normal Shades (capturable) ---
+    "dutch_shade": {
+        "name": "Dutch",
         "hp": 5,
         "hit_threshold": 17,
         "tier": "normal",
-        "companion_type": "shadow_thief",
-        "crit_chance": 0.25,  # Plays tight, hits hard when it wins.
+        "companion_type": "dutch",
+        "crit_chance": 0.25,
     },
-    "turtle": {
-        "name": "Turtle",
+    "nines_shade": {
+        "name": "Nines",
+        "hp": 5,
+        "hit_threshold": 16,
+        "tier": "normal",
+        "companion_type": "nines",
+        "reckless_extra": 1,
+    },
+    "maggie_shade": {
+        "name": "Maggie",
+        "hp": 4,
+        "hit_threshold": 15,
+        "tier": "normal",
+        "companion_type": "maggie",
+    },
+    "priest_shade": {
+        "name": "Priest",
         "hp": 8,
         "hit_threshold": 13,
         "tier": "normal",
-        "companion_type": "shield_turtle",
-        "damage_absorption": 1,  # Shell: absorbs 1 damage per hand.
+        "companion_type": "priest",
+        "damage_absorption": 1,
     },
-    "cat": {
-        "name": "Wild Cat",
+    "sable_shade": {
+        "name": "Sable",
         "hp": 3,
         "hit_threshold": 18,
         "tier": "normal",
-        "companion_type": "lucky_cat",
-        "nine_lives_chance": 0.5,  # 50% chance to survive death once.
+        "companion_type": "sable",
+        "nine_lives_chance": 0.5,
     },
 
-    # --- Elite enemies ---
-    "orc": {
-        "name": "Orc Warrior",
+    # --- House Dealers (elite) ---
+    "dealer_knuckles": {
+        "name": "Knuckles",
         "hp": 10,
         "hit_threshold": 17,
         "tier": "elite",
         "companion_type": "",
         "bonus_damage": 2,
-        "rage_per_hand": 1,  # Gets angrier each hand. Kill fast.
+        "rage_per_hand": 1,
     },
-    "witch": {
-        "name": "Witch",
+    "dealer_hemlock": {
+        "name": "Hemlock",
         "hp": 9,
         "hit_threshold": 16,
         "tier": "elite",
         "companion_type": "",
-        "poison_per_hand": 1,  # Bleeds you every hand regardless.
+        "poison_per_hand": 1,
     },
-    "assassin": {
-        "name": "Assassin",
+    "dealer_stiletto": {
+        "name": "Stiletto",
         "hp": 9,
         "hit_threshold": 17,
         "tier": "elite",
         "companion_type": "",
-        "crit_chance": 0.30,       # High crit rate.
-        "backstab_on_21": True,    # Guaranteed crit on exactly 21.
+        "crit_chance": 0.30,
+        "backstab_on_21": True,
     },
 
-    # --- Boss enemies ---
-    "dragon": {
-        "name": "Dragon",
+    # --- Pit Bosses ---
+    "boss_silk": {
+        "name": "Silk",
         "hp": 15,
         "hit_threshold": 17,
         "tier": "boss",
         "companion_type": "",
-        "forced_extra_hits": 1,  # Forces player to hit once extra.
+        "forced_extra_hits": 1,
     },
-    "lich": {
-        "name": "Lich",
+    "boss_hollow": {
+        "name": "The Hollow",
         "hp": 13,
         "hit_threshold": 17,
         "tier": "boss",
         "companion_type": "",
-        "drain": True,  # Heals for damage dealt when it wins.
+        "drain": True,
+    },
+    "boss_croupier": {
+        "name": "The Croupier",
+        "hp": 14,
+        "hit_threshold": 18,
+        "tier": "boss",
+        "companion_type": "",
+        "damage_absorption": 2,
+        "reckless_extra": 1,
     },
 }
 
@@ -342,36 +372,36 @@ ENEMY_TEMPLATES = {
 # Multiplicative companions compound with deck improvement for power curve.
 # ---------------------------------------------------------------------------
 COMPANION_TEMPLATES = {
-    "fire_imp": {
-        "name": "Fire Imp",
-        "effect_type": "damage_multiplier",
-        "activation": "two_red",       # needs two red cards (♥♦) in hand
-        "base_value": 1.40,
-        "per_level": 0.05,
-    },
-    "shield_turtle": {
-        "name": "Shield Turtle",
-        "effect_type": "damage_reduction_pct",
-        "activation": "two_black",     # needs two black cards (♣♠) in hand
-        "base_value": 0.30,
-        "per_level": 0.03,
-    },
-    "lucky_cat": {
-        "name": "Lucky Cat",
-        "effect_type": "natural_21_multiplier",
-        "activation": "natural_21",    # only on natural blackjack
-        "base_value": 2.5,
-        "per_level": 0.25,
-    },
-    "shadow_thief": {
-        "name": "Shadow Thief",
+    "dutch": {
+        "name": "Dutch",
         "effect_type": "peek_enemy",
         "activation": "always",
         "base_value": 1,
         "per_level": 0,
     },
-    "goblin_shaman": {
-        "name": "Goblin Shaman",
+    "maggie": {
+        "name": "Maggie",
+        "effect_type": "damage_multiplier",
+        "activation": "two_black",     # needs two black cards (♣♠) in hand
+        "base_value": 1.40,
+        "per_level": 0.05,
+    },
+    "priest": {
+        "name": "Priest",
+        "effect_type": "damage_reduction_pct",
+        "activation": "two_red",       # needs two red cards (♥♦) in hand
+        "base_value": 0.30,
+        "per_level": 0.03,
+    },
+    "sable": {
+        "name": "Sable",
+        "effect_type": "natural_21_multiplier",
+        "activation": "natural_21",    # only on natural blackjack
+        "base_value": 2.5,
+        "per_level": 0.25,
+    },
+    "nines": {
+        "name": "Nines",
         "effect_type": "unbust_chance",
         "activation": "on_bust",
         "base_value": 0.30,

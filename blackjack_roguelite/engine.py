@@ -151,12 +151,15 @@ class Companion:
     base_value: float
     per_level: float
     activation: str = "always"
+    source_rarity: str = "common"
+    power_multiplier: float = 1.0
     level: int = 1
     xp: int = 0
 
     @property
     def effect_value(self) -> float:
-        return self.base_value + self.per_level * (self.level - 1)
+        base = self.base_value + self.per_level * (self.level - 1)
+        return base * self.power_multiplier
 
     def gain_xp(self, amount: int, xp_per_level: int, max_level: int):
         self.xp += amount
@@ -297,10 +300,39 @@ class Enemy:
     crit_chance: float = 0.0       # Chance to crit on wins
     crit_multiplier: float = 1.5   # Crit damage multiplier
     backstab_on_21: bool = False   # Guaranteed crit when enemy hand is exactly 21
+    capture_roll: float = 1.0      # Per-enemy shade roll (capture power variance)
+    capture_power_mult: float = 1.0
 
     @property
     def alive(self) -> bool:
         return self.hp > 0
+
+
+def capture_roll_for_rarity(config: GameConfig, rarity: str) -> float:
+    """Per-enemy variance roll for capture power and difficulty."""
+    ranges = config.companion.capture_roll_range_by_rarity
+    lo, hi = ranges.get(rarity, ranges.get("common", (1.0, 1.0)))
+    if hi < lo:
+        lo, hi = hi, lo
+    return random.uniform(lo, hi)
+
+
+def capture_chance_for_rarity(config: GameConfig, rarity: str, capture_roll: float = 1.0) -> float:
+    """Chance to capture a shade of this rarity."""
+    mults = config.companion.capture_rarity_chance_mult
+    mult = mults.get(rarity, mults.get("common", 1.0))
+    chance = config.companion.capture_chance * mult
+    # Stronger rolled shades are harder to catch.
+    roll_factor = max(0.60, min(1.10, 2.0 - capture_roll))
+    chance *= roll_factor
+    return max(0.0, min(1.0, chance))
+
+
+def companion_power_multiplier_for_rarity(config: GameConfig, rarity: str, capture_roll: float = 1.0) -> float:
+    """Companion effect multiplier granted by captured rarity."""
+    mults = config.companion.capture_rarity_power_mult
+    base = mults.get(rarity, mults.get("common", 1.0))
+    return max(0.1, base * capture_roll)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +343,7 @@ class Player:
     hp: int = 100
     max_hp: int = 100
     companions: List[Companion] = field(default_factory=list)
+    reserve_companions: List[Companion] = field(default_factory=list)
     max_companion_slots: int = 3
     gold: int = 0
     folds: int = 0
@@ -347,7 +380,42 @@ class Player:
         return self.get_companion_effect("peek_enemy", cards) is not None
 
     def can_capture(self) -> bool:
+        return True
+
+    def has_free_active_slot(self) -> bool:
         return len(self.companions) < self.max_companion_slots
+
+    def total_companions(self) -> int:
+        return len(self.companions) + len(self.reserve_companions)
+
+    def add_captured_companion(self, comp: Companion) -> str:
+        """Add a captured companion to active or reserve roster.
+
+        Returns one of:
+        - 'active': added to active combat slots
+        - 'replaced': moved an active companion to reserve and activated new one
+        - 'reserve': added to reserve roster
+        """
+        if self.has_free_active_slot():
+            self.companions.append(comp)
+            return "active"
+
+        # Auto-upgrade active lineup when incoming effect is missing.
+        active_effects = [c.effect_type for c in self.companions]
+        if comp.effect_type not in active_effects:
+            # Prefer replacing duplicate-effect companion with lowest level.
+            dupe_idxs = [
+                i for i, c in enumerate(self.companions)
+                if active_effects.count(c.effect_type) > 1
+            ]
+            if dupe_idxs:
+                idx = min(dupe_idxs, key=lambda i: (self.companions[i].level, i))
+                self.reserve_companions.append(self.companions[idx])
+                self.companions[idx] = comp
+                return "replaced"
+
+        self.reserve_companions.append(comp)
+        return "reserve"
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +480,38 @@ class RunResult:
     rewards_chosen: List[str] = field(default_factory=list)
     class_upgrades: int = 0
     class_id: Optional[str] = None
+
+
+def capture_bonus_from_fight(fight: FightResult) -> tuple[float, list[str]]:
+    """Skill-based bonus chance for capturing after a winning fight."""
+    if not fight or not fight.hands:
+        return 0.0, []
+
+    # Flatten split results so bust/fold checks are accurate.
+    flat_hands: List[HandResult] = []
+    for h in fight.hands:
+        if h.was_split and h.split_results:
+            flat_hands.extend(h.split_results)
+        else:
+            flat_hands.append(h)
+
+    bonus = 0.0
+    reasons: List[str] = []
+
+    if len(fight.hands) <= 3:
+        bonus += 0.04
+        reasons.append("quick finish +4%")
+    if any(h.player_natural for h in flat_hands):
+        bonus += 0.05
+        reasons.append("natural 21 +5%")
+    if all(not h.player_busted for h in flat_hands) and all(h.outcome != "fold" for h in flat_hands):
+        bonus += 0.06
+        reasons.append("clean fight +6%")
+    if any(h.outcome == "win" and h.player_value >= 20 for h in flat_hands):
+        bonus += 0.03
+        reasons.append("high-total finish +3%")
+
+    return min(0.18, bonus), reasons
 
 
 # ---------------------------------------------------------------------------
@@ -848,11 +948,11 @@ class CombatEngine:
         damage = self._base_damage(p_val, e_val)
 
         if is_natural:
-            # Lucky Cat: standalone multiplier on natural 21
+            # Sable: standalone multiplier on natural 21
             cat_mult = player.get_companion_effect("natural_21_multiplier", player_cards)
             if cat_mult:
                 damage *= cat_mult
-                effects_log.append(f"Lucky Cat: natural 21 ({cat_mult:.1f}x)")
+                effects_log.append(f"Sable: natural 21 ({cat_mult:.1f}x)")
             else:
                 damage *= self.config.damage.natural_21_multiplier
 
@@ -860,11 +960,11 @@ class CombatEngine:
         if not is_natural and margin >= self.config.damage.margin_bonus_threshold:
             damage *= self.config.damage.margin_bonus_multiplier
 
-        # Fire Imp: multiplicative damage on wins (needs activation condition)
+        # Maggie: multiplicative damage on wins (needs activation condition)
         imp_mult = player.get_companion_effect("damage_multiplier", player_cards)
         if imp_mult:
             damage *= imp_mult
-            effects_log.append(f"Fire Imp: {imp_mult:.2f}x damage")
+            effects_log.append(f"Maggie: {imp_mult:.2f}x damage")
 
         # Class damage bonus
         if player.class_stats.damage_pct:
@@ -897,12 +997,12 @@ class CombatEngine:
                 damage *= enemy.crit_multiplier
                 effects_log.append(f"Enemy CRIT! x{enemy.crit_multiplier:.1f}")
 
-        # Shield Turtle: percentage damage reduction (needs activation condition)
+        # Priest: percentage damage reduction (needs activation condition)
         reduction_pct = player.get_companion_effect("damage_reduction_pct", player_cards)
         if reduction_pct:
             reduced = damage * reduction_pct
             damage = max(0, damage - reduced)
-            effects_log.append(f"Shield Turtle: -{reduction_pct*100:.0f}% ({reduced:.0f} blocked)")
+            effects_log.append(f"Priest: -{reduction_pct*100:.0f}% ({reduced:.0f} blocked)")
 
         # Class damage reduction (multiplicative with Shield Turtle, capped 0.35)
         if player.class_stats.damage_reduction_pct:
@@ -1056,6 +1156,34 @@ class RunEngine:
         self.config = config
         self.combat = CombatEngine(config)
 
+    @staticmethod
+    def _draw_varied(pool, count):
+        """Draw encounters with minimal repeats while preserving randomness."""
+        if count <= 0 or not pool:
+            return []
+
+        # Common case: sample without replacement.
+        if count <= len(pool):
+            picks = pool[:]
+            random.shuffle(picks)
+            return picks[:count]
+
+        # Fallback when count exceeds pool size: reshuffle in cycles and
+        # avoid an immediate back-to-back repeat across cycle boundaries.
+        picks = []
+        bag = []
+        last = None
+        while len(picks) < count:
+            if not bag:
+                bag = pool[:]
+                random.shuffle(bag)
+                if last is not None and len(bag) > 1 and bag[-1] == last:
+                    bag[-1], bag[-2] = bag[-2], bag[-1]
+            pick = bag.pop()
+            picks.append(pick)
+            last = pick
+        return picks
+
     def _generate_encounters(self):
         """Build the encounter list for a full run."""
         normals = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier", "normal") == "normal"]
@@ -1064,11 +1192,12 @@ class RunEngine:
 
         encounters = []
         for act in range(self.config.run.acts):
-            for _ in range(self.config.run.fights_per_act):
-                encounters.append((random.choice(normals), act))
-            for _ in range(self.config.run.elites_per_act):
-                encounters.append((random.choice(elites), act))
-            encounters.append((random.choice(bosses), act))
+            for key in self._draw_varied(normals, self.config.run.fights_per_act):
+                encounters.append((key, act))
+            for key in self._draw_varied(elites, self.config.run.elites_per_act):
+                encounters.append((key, act))
+            if bosses:
+                encounters.append((random.choice(bosses), act))
         return encounters
 
     @staticmethod
@@ -1090,6 +1219,19 @@ class RunEngine:
 
         threshold = min(19, t["hit_threshold"] + buffs["threshold"])
         bonus_dmg = t.get("bonus_damage", 0) + buffs["bonus_damage"]
+        capture_roll = 1.0
+        capture_power_mult = 1.0
+
+        if t.get("companion_type"):
+            capture_roll = capture_roll_for_rarity(self.config, rarity)
+            capture_power_mult = companion_power_multiplier_for_rarity(
+                self.config, rarity, capture_roll
+            )
+            # Higher-roll shades are a bit tougher to beat.
+            diff_mult = 1.0 + max(0.0, capture_roll - 1.0) * 0.45
+            scaled_hp = max(1, int(scaled_hp * diff_mult))
+            if capture_roll >= 1.12:
+                threshold = min(19, threshold + 1)
 
         return Enemy(
             name=t["name"],
@@ -1109,6 +1251,8 @@ class RunEngine:
             drain=t.get("drain", False),
             crit_chance=t.get("crit_chance", 0.0),
             backstab_on_21=t.get("backstab_on_21", False),
+            capture_roll=capture_roll,
+            capture_power_mult=capture_power_mult,
         )
 
     def play_run(self, strategy, capture_strategy, reward_strategy=None,
@@ -1160,9 +1304,9 @@ class RunEngine:
                 )
                 can_heal = player.hp < player.max_hp
 
-                # Capture opportunity -- always offered, but can fail on attempt
-                can_capture = (enemy.companion_type and enemy.tier == "normal"
-                               and player.can_capture())
+                # Capture opportunity on normal shades; full slots can still
+                # be handled by reward strategy via companion replacement.
+                can_capture = (enemy.companion_type and enemy.tier == "normal")
 
                 # Enchant opportunity
                 can_enchant = bool(self.combat.deck.enchantable_cards(
@@ -1218,8 +1362,16 @@ class RunEngine:
                 elif choice == "heal":
                     player.heal(heal_amount)
                 elif choice == "capture" and can_capture:
+                    captured = False
+                    capture_bonus, _ = capture_bonus_from_fight(result)
+                    capture_chance = min(
+                        0.95,
+                        capture_chance_for_rarity(
+                            self.config, enemy.rarity, enemy.capture_roll
+                        ) + capture_bonus,
+                    )
                     # Roll for capture success
-                    if random.random() < self.config.companion.capture_chance:
+                    if random.random() < capture_chance:
                         template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
                         if template:
                             comp = Companion(
@@ -1229,9 +1381,12 @@ class RunEngine:
                                 base_value=template["base_value"],
                                 per_level=template["per_level"],
                                 activation=template.get("activation", "always"),
+                                source_rarity=enemy.rarity,
+                                power_multiplier=enemy.capture_power_mult,
                             )
-                            player.companions.append(comp)
+                            player.add_captured_companion(comp)
                             result.companion_captured = enemy.companion_type
+                            captured = True
                 elif choice == "class_upgrade" and can_class_upgrade:
                     talent_key = reward_strategy.choose_class_talent(player)
                     if talent_key and apply_talent_upgrade(player, talent_key):
@@ -1252,7 +1407,10 @@ class RunEngine:
             total_encounters=len(encounters),
             final_hp=player.hp,
             companions_captured=[f.companion_captured for f in fights if f.companion_captured],
-            companion_levels={c.name: c.level for c in player.companions},
+            companion_levels={
+                f"{c.name}#{i+1}": c.level
+                for i, c in enumerate(player.companions + player.reserve_companions)
+            },
             cards_removed=cards_removed,
             enchantments_applied=enchantments_applied,
             fold_rewards=fold_rewards,
