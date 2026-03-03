@@ -21,6 +21,10 @@ class Strategy:
         """Override to enable folding. Called before hit/stand."""
         return False
 
+    def should_split(self, hand_cards, player, enemy):
+        """Override to enable splitting pairs. Called before hit/stand."""
+        return False
+
 
 class RandomStrategy(Strategy):
     name = "random"
@@ -54,6 +58,36 @@ class BasicStrategy(Strategy):
             return "stand"
         return "hit"
 
+    def should_fold(self, hand_cards, player, enemy):
+        if player.folds <= 0:
+            return False
+        val = hand_value(hand_cards)
+        hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+        # Fold weak hands when HP is critical
+        if val <= 12 and hp_pct < 0.25:
+            return True
+        # Fold weak hands vs high-rage enemies
+        if val <= 13 and enemy.bonus_damage >= 4:
+            return True
+        return False
+
+    def should_split(self, hand_cards, player, enemy):
+        val = hand_value(hand_cards)
+        rank = hand_cards[0].rank
+        # Always split Aces (two chances at 21)
+        if rank == "A":
+            return True
+        # Split 8s (16 is the worst hand)
+        if rank == "8":
+            return True
+        # Never split 10s/faces (20 is great)
+        if hand_cards[0].value == 10:
+            return False
+        # Split low pairs (2-7) vs weak enemies
+        if val <= 14:
+            return True
+        return False
+
 
 class AggressiveStrategy(Strategy):
     """Hits until 19+. Push-your-luck player."""
@@ -61,6 +95,24 @@ class AggressiveStrategy(Strategy):
 
     def decide(self, hand_cards, visible_enemy_value, bust_probability, companions):
         return "stand" if hand_value(hand_cards) >= 19 else "hit"
+
+    def should_fold(self, hand_cards, player, enemy):
+        if player.folds <= 0:
+            return False
+        val = hand_value(hand_cards)
+        hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+        # Aggressive only folds when truly desperate
+        if val <= 11 and hp_pct < 0.15:
+            return True
+        if val <= 12 and enemy.bonus_damage >= 5:
+            return True
+        return False
+
+    def should_split(self, hand_cards, player, enemy):
+        # Aggressive splits everything except 10s/faces
+        if hand_cards[0].value == 10:
+            return False
+        return True
 
 
 class SmartStrategy(Strategy):
@@ -104,6 +156,29 @@ class SmartStrategy(Strategy):
         if val < 14 and enemy.bonus_damage >= 3:
             return True
 
+        return False
+
+    def should_split(self, hand_cards, player, enemy):
+        rank = hand_cards[0].rank
+        val = hand_value(hand_cards)
+        # Always split Aces
+        if rank == "A":
+            return True
+        # Always split 8s (16 is terrible)
+        if rank == "8":
+            return True
+        # Never split 10s/faces (20 is strong)
+        if hand_cards[0].value == 10:
+            return False
+        # Never split 5s (10 is a good hitting hand)
+        if rank == "5":
+            return False
+        # Split low pairs vs weak-showing enemies
+        if val <= 14 and enemy.hit_threshold <= 16:
+            return True
+        # Split 9s unless enemy is likely to stay low
+        if rank == "9" and enemy.hit_threshold >= 17:
+            return True
         return False
 
 

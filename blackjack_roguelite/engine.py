@@ -279,6 +279,8 @@ class HandResult:
     companion_effects: List[str] = field(default_factory=list)
     highlights: List[str] = field(default_factory=list)
     siphon_heal: int = 0
+    was_split: bool = False
+    split_results: List['HandResult'] = field(default_factory=list)
 
 
 @dataclass
@@ -317,14 +319,139 @@ class CombatEngine:
         self.config = config
         self.deck = Deck()
 
-    def _play_enemy_hand(self, enemy_cards: List[Card], enemy: Enemy):
-        """Enemy plays its hand according to threshold + abilities."""
+    def _play_enemy_hand(self, enemy_cards: List[Card], enemy: Enemy, p_val: int = 0):
+        """Enemy plays its hand according to threshold + abilities.
+
+        p_val: player's final hand value. Elite/boss enemies stop drawing
+        once they're already winning.
+        """
+        aware = enemy.tier in ("elite", "boss")
         while hand_value(enemy_cards) <= enemy.hit_threshold:
+            if aware and p_val and hand_value(enemy_cards) > p_val:
+                break
             enemy_cards.append(self.deck.draw())
         # Reckless: extra hits past threshold
         for _ in range(enemy.reckless_extra):
             if hand_value(enemy_cards) < 21:
+                if aware and p_val and hand_value(enemy_cards) > p_val:
+                    break
                 enemy_cards.append(self.deck.draw())
+
+    def _play_one_sub_hand(self, sub_cards, enemy, strategy, player):
+        """Play a single sub-hand (hit/stand loop, no fold). Returns (cards, busted, p_val, decisions)."""
+        peek = player.get_companion_effect("peek_enemy", sub_cards)
+        # Sub-hands don't see enemy cards -- just use card[0] value
+        visible_enemy = 0  # not relevant for sub-hand decisions
+        forced_hits = enemy.forced_extra_hits
+        decisions = []
+        busted = False
+
+        while True:
+            val = hand_value(sub_cards)
+            if val > 21:
+                unbust = player.get_companion_effect("unbust_chance", sub_cards)
+                if unbust and random.random() < unbust:
+                    sub_cards.pop()
+                    continue
+                busted = True
+                break
+            if val == 21:
+                break
+
+            bust_prob = self.deck.bust_probability(sub_cards)
+            if forced_hits > 0:
+                decision = "hit"
+                forced_hits -= 1
+            else:
+                decision = strategy.decide(sub_cards, visible_enemy, bust_prob, player.companions)
+
+            is_tense = 0.20 <= bust_prob <= 0.70
+            decisions.append(DecisionPoint(val, bust_prob, decision, visible_enemy, is_tense))
+
+            if decision == "stand":
+                break
+            sub_cards.append(self.deck.draw())
+
+        return sub_cards, busted, hand_value(sub_cards), decisions
+
+    def _resolve_sub_hand(self, p_val, e_val, player_busted, enemy_busted, player_cards, player):
+        """Resolve one sub-hand vs enemy. Returns (damage_dealt, damage_taken, outcome)."""
+        companion_effects = []
+        if player_busted:
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards)
+            dmg *= self.config.damage.bust_penalty_multiplier
+            return 0, dmg, "lose"
+        if enemy_busted:
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards)
+            return dmg, 0, "win"
+        if p_val > e_val:
+            dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards)
+            return dmg, 0, "win"
+        if e_val > p_val:
+            dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards)
+            return 0, dmg, "lose"
+        return 0, 0, "push"
+
+    def _play_split_hand(self, player, enemy, player_cards, enemy_cards, strategy):
+        """Handle a split: two sub-hands, one enemy turn, combined result."""
+        card_a, card_b = player_cards
+        hand_a = [card_a, self.deck.draw()]
+        hand_b = [card_b, self.deck.draw()]
+
+        hand_a, busted_a, val_a, decs_a = self._play_one_sub_hand(hand_a, enemy, strategy, player)
+        hand_b, busted_b, val_b, decs_b = self._play_one_sub_hand(hand_b, enemy, strategy, player)
+
+        # Enemy plays once, aware of best non-busted hand
+        best_p = max(
+            (hand_value(h) for h, b in [(hand_a, busted_a), (hand_b, busted_b)] if not b),
+            default=0)
+        if best_p > 0:
+            self._play_enemy_hand(enemy_cards, enemy, p_val=best_p)
+        e_val = hand_value(enemy_cards)
+        enemy_busted = e_val > 21
+
+        # Resolve each sub-hand
+        dealt_a, taken_a, out_a = self._resolve_sub_hand(val_a, e_val, busted_a, enemy_busted, hand_a, player)
+        dealt_b, taken_b, out_b = self._resolve_sub_hand(val_b, e_val, busted_b, enemy_busted, hand_b, player)
+
+        # Build sub-hand results for tracking
+        sub_a = HandResult(
+            hand_a, enemy_cards, val_a, e_val,
+            busted_a, enemy_busted, False, False,
+            dealt_a, taken_a, out_a,
+            decs_a, [], ["split_hand_a"],
+        )
+        sub_b = HandResult(
+            hand_b, enemy_cards, val_b, e_val,
+            busted_b, enemy_busted, False, False,
+            dealt_b, taken_b, out_b,
+            decs_b, [], ["split_hand_b"],
+        )
+
+        # Combined result: aggregate damage, worst outcome
+        total_dealt = dealt_a + dealt_b
+        total_taken = taken_a + taken_b
+        if out_a == "win" or out_b == "win":
+            combined_outcome = "win" if total_dealt >= total_taken else "lose"
+        elif out_a == "lose" and out_b == "lose":
+            combined_outcome = "lose"
+        else:
+            combined_outcome = "push"
+
+        # Use the better hand's cards as the "primary" for enchantment finalization
+        primary_cards = hand_a if val_a >= val_b else hand_b
+        all_decisions = decs_a + decs_b
+        highlights = ["split"]
+
+        return HandResult(
+            primary_cards, enemy_cards,
+            max(val_a, val_b), e_val,
+            busted_a and busted_b, enemy_busted,
+            False, False,
+            total_dealt, total_taken, combined_outcome,
+            all_decisions, [], highlights,
+            was_split=True, split_results=[sub_a, sub_b],
+        )
 
     def play_hand(self, player: Player, enemy: Enemy, strategy) -> HandResult:
         """Play a single hand of blackjack combat."""
@@ -380,6 +507,14 @@ class CombatEngine:
                 False, False, False, True, 0, dmg, "lose",
                 decision_points, companion_effects, highlights,
             )
+
+        # --- Split check ---
+        is_pair = (len(player_cards) == 2
+                   and player_cards[0].rank == player_cards[1].rank)
+        if (is_pair
+            and hasattr(strategy, 'should_split')
+            and strategy.should_split(player_cards, player, enemy)):
+            return self._play_split_hand(player, enemy, player_cards, enemy_cards, strategy)
 
         # --- What the player can see ---
         peek = player.get_companion_effect("peek_enemy", player_cards)
@@ -440,7 +575,7 @@ class CombatEngine:
         # Enemy doesn't need to play. This IS the house edge.
         enemy_busted = False
         if not player_busted:
-            self._play_enemy_hand(enemy_cards, enemy)
+            self._play_enemy_hand(enemy_cards, enemy, p_val=p_val)
             e_val = hand_value(enemy_cards)
             enemy_busted = e_val > 21
         else:
