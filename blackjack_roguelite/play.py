@@ -1108,28 +1108,27 @@ class Game:
             print("  No cards available to enchant.")
             return
 
+        card_arrows = ["left", "right", "down"]
+        card_syms = {"left": "\u2190", "right": "\u2192", "down": "\u2193"}
+        card_keys = []
+        card_labels = {}
+        card_map = {}
+
         print(f"\n  Pick a card to enchant:")
         for i, card in enumerate(cards):
+            key = card_arrows[i]
+            card_keys.append(key)
+            card_labels[key] = show_card(card)
+            card_map[key] = card
             ench = self.deck.get_enchantments(card)
             ench_str = ""
             if ench:
                 tags = ", ".join(e.capitalize() for e in ench)
                 ench_str = f"  ({tags})"
-            print(f"    {i+1}. {show_card(card)}{ench_str}")
+            print(f"    {card_syms[key]} {show_card(card)}{ench_str}")
 
-        valid_nums = [str(i + 1) for i in range(len(cards))]
-        chosen_card = None
-        while True:
-            sys.stdout.write("  > ")
-            sys.stdout.flush()
-            ch = read_key()
-            if ch == '\x03':
-                print("\n\n  Goodbye!")
-                sys.exit(0)
-            if ch in valid_nums:
-                print(ch)
-                chosen_card = cards[int(ch) - 1]
-                break
+        choice = prompt_choice("  >", card_keys, card_labels)
+        chosen_card = card_map[choice]
 
         # Offer enchantment types
         all_types = ["fury", "siphon", "ward"]
