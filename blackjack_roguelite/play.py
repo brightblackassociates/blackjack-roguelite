@@ -2000,13 +2000,13 @@ class Game:
                 if c.level >= max_lvl:
                     typewrite(f"  {C_AMBER}  MAX LEVEL{C_RESET}", delay=0.04)
                 else:
-                    xp_bar = xp_bar(c.xp, xp_per, 12)
-                    print(f"  {C_DIM}  {xp_bar} {c.xp}/{xp_per} XP{C_RESET}")
+                    xp_display = xp_bar(c.xp, xp_per, 12)
+                    print(f"  {C_DIM}  {xp_display} {c.xp}/{xp_per} XP{C_RESET}")
             elif c.level < max_lvl:
                 # Show XP gain and progress bar
-                xp_bar = xp_bar(c.xp, xp_per, 12)
+                xp_display = xp_bar(c.xp, xp_per, 12)
                 shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
-                print(f"  {shade_c}{c.name}{C_RESET} +{xp_gain} XP  {xp_bar} {c.xp}/{xp_per}  Lv{c.level}")
+                print(f"  {shade_c}{c.name}{C_RESET} +{xp_gain} XP  {xp_display} {c.xp}/{xp_per}  Lv{c.level}")
             else:
                 shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
                 print(f"  {shade_c}{c.name}{C_RESET} Lv{c.level} {C_AMBER}MAX{C_RESET}")
