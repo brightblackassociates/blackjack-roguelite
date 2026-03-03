@@ -84,14 +84,14 @@ class RunConfig:
     fights_per_act: int = 3
     elites_per_act: int = 1
     # Boss is always the final fight of each act
-    heal_between_acts_pct: float = 0.42  # Heal 42% max HP between acts
+    heal_between_acts_pct: float = 0.35  # Heal 35% max HP between acts
     act_hp_multipliers: list = field(default_factory=lambda: [1.0, 1.3, 1.6])
 
 
 @dataclass
 class RewardConfig:
-    heal_amount: int = 8
-    heal_amount_elite: int = 12
+    heal_amount: int = 7
+    heal_amount_elite: int = 10
     min_deck_size: int = 20
 
 

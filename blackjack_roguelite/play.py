@@ -8,6 +8,7 @@ import re
 import sys
 import os
 import time
+from collections import Counter
 import tty
 import termios
 
@@ -15,6 +16,7 @@ from .config import GameConfig, ENEMY_TEMPLATES, COMPANION_TEMPLATES, CLASS_TEMP
 from .engine import (Card, Deck, hand_value, is_natural_21, Player, Enemy, Companion,
                      RARITY_BUFFS, RARITY_WEIGHTS, RANKS, check_activation,
                      build_class_stats, capture_roll_for_rarity, capture_chance_for_rarity,
+                     enemy_deck_removed_ranks, enemy_deck_quality_label, build_enemy_deck_from_removed_ranks,
                      companion_power_multiplier_for_rarity)
 
 
@@ -34,7 +36,16 @@ C_AMBER   = "\033[38;5;214m"   # Warnings, Shade abilities
 C_BRED    = "\033[1;31m"       # Defeat, bust
 C_BGREEN  = "\033[1;32m"       # Wins, emphasis
 C_BWHITE  = "\033[1;37m"       # Headers
-C_PHANTOM = "\033[38;5;245m"   # Shade whispers
+C_PHANTOM = "\033[38;5;245m"   # Shade whispers (fallback)
+
+# Per-shade colors: each companion gets a unique hue
+SHADE_COLORS = {
+    "dutch":  "\033[38;5;33m",   # Steel blue -- cool, observant
+    "maggie": "\033[38;5;196m",  # Flame red -- volatile, fierce
+    "priest": "\033[38;5;251m",  # Silver white -- calm, stoic
+    "sable":  "\033[38;5;141m",  # Violet -- elegant, deadly
+    "nines":  "\033[38;5;178m",  # Burnished gold -- street tough
+}
 C_REVERSE = "\033[7m"          # inverse video
 C_REV_RED = "\033[7;31m"       # inverse video red
 
@@ -120,6 +131,9 @@ def e_val_str(cards):
     return f"{C_AMBER}{hand_value(cards)}{C_RESET}"
 
 
+TIER_LABELS = {"normal": " [SHADE]", "elite": " [DEALER]", "boss": " [PIT BOSS]"}
+
+
 def hp_color(current, maximum):
     """ANSI color code based on chip percentage: green/amber/red."""
     pct = max(0, current / maximum)
@@ -130,11 +144,21 @@ def hp_color(current, maximum):
     return C_RED
 
 
-def hp_bar(current, maximum, width=20):
-    pct = max(0, current / maximum)
+def progress_bar(current, maximum, width=20, color=None,
+                  filled_char='█', empty_char='░'):
+    pct = max(0.0, min(1.0, current / maximum)) if maximum > 0 else 0
     filled = int(width * pct)
-    color = hp_color(current, maximum)
-    return f"{color}{'█' * filled}{C_RESET}{C_DIM}{'░' * (width - filled)}{C_RESET}"
+    if color is None:
+        color = C_GREEN
+    return f"{color}{filled_char * filled}{C_RESET}{C_DIM}{empty_char * (width - filled)}{C_RESET}"
+
+
+def hp_bar(current, maximum, width=20):
+    return progress_bar(current, maximum, width, hp_color(current, maximum), '█', '░')
+
+
+def xp_bar(xp, xp_max, width=12):
+    return progress_bar(xp, xp_max, width, C_GREEN, '▮', '▯')
 
 
 def read_key():
@@ -360,31 +384,140 @@ SHADE_ABILITY_DESC = {
 }
 
 SHADE_WHISPERS = {
-    "dutch": [
-        "Dealer's hiding a {card}.",
-        "I see what they've got.",
-        "They can't bluff me.",
-    ],
-    "maggie": [
-        "Watch it burn.",
-        "That one's going to leave a mark.",
-        "Nothing left but ashes.",
-    ],
-    "priest": [
-        "I'll take the hit.",
-        "Stay behind me.",
-        "Some prayers do get answered.",
-    ],
-    "sable": [
-        "The ace always finds its way home.",
-        "Twenty-one. Clean.",
-        "That's how it's done.",
-    ],
-    "nines": [
-        "Not your time yet.",
-        "Second chance. Don't waste it.",
-        "I've pulled worse from the grave.",
-    ],
+    "dutch": {
+        "proc": [
+            "Dealer's hiding a {card}.",
+            "I see what they've got.",
+            "They can't bluff me.",
+        ],
+        "fight_start": [
+            "I'll keep my eyes open.",
+            "Let me watch the table.",
+            "Already counting.",
+        ],
+        "win": [
+            "Read 'em like a pamphlet.",
+            "Knew that hand was ours.",
+        ],
+        "loss": [
+            "Should've seen that coming.",
+            "Bad read. Won't happen again.",
+        ],
+        "enemy_bust": [
+            "Got greedy. They always do.",
+        ],
+        "low_hp": [
+            "Careful. We're thin.",
+            "Not much room left to play with.",
+        ],
+    },
+    "maggie": {
+        "proc": [
+            "Watch it burn.",
+            "That one's going to leave a mark.",
+            "Nothing left but ashes.",
+        ],
+        "fight_start": [
+            "Light it up.",
+            "This one won't last.",
+        ],
+        "win": [
+            "Scorched.",
+            "They felt that.",
+        ],
+        "loss": [
+            "We'll get 'em back double.",
+            "That just makes me angrier.",
+        ],
+        "enemy_bust": [
+            "Burned themselves out.",
+            "Flame eats everything.",
+        ],
+        "low_hp": [
+            "Not dead yet.",
+            "Pain is fuel.",
+        ],
+    },
+    "priest": {
+        "proc": [
+            "I'll take the hit.",
+            "Stay behind me.",
+            "Some prayers do get answered.",
+        ],
+        "fight_start": [
+            "Stay steady.",
+            "Keep your head.",
+        ],
+        "win": [
+            "Patience wins.",
+            "That's discipline talking.",
+        ],
+        "loss": [
+            "Hold together.",
+            "Endure. That's all we need to do.",
+        ],
+        "enemy_bust": [
+            "No pity for the reckless.",
+        ],
+        "low_hp": [
+            "I'll hold the line.",
+            "Not our time.",
+            "Stand firm.",
+        ],
+    },
+    "sable": {
+        "proc": [
+            "The ace always finds its way home.",
+            "Twenty-one. Clean.",
+            "That's how it's done.",
+        ],
+        "fight_start": [
+            "Let's make this quick.",
+            "Watch for the opening.",
+        ],
+        "win": [
+            "Elegant.",
+            "Clean finish.",
+        ],
+        "loss": [
+            "Won't miss next time.",
+            "Sharpen up.",
+        ],
+        "enemy_bust": [
+            "Sloppy play. Predictable.",
+        ],
+        "low_hp": [
+            "Nine lives, remember?",
+            "Almost out of tricks.",
+        ],
+    },
+    "nines": {
+        "proc": [
+            "Not your time yet.",
+            "Second chance. Don't waste it.",
+            "I've pulled worse from the grave.",
+        ],
+        "fight_start": [
+            "I got your back.",
+            "Stay loose.",
+        ],
+        "win": [
+            "That's how the street does it.",
+            "Another one down.",
+        ],
+        "loss": [
+            "Shake it off.",
+            "We've been worse off.",
+        ],
+        "enemy_bust": [
+            "Serves 'em right.",
+            "Choked under pressure.",
+        ],
+        "low_hp": [
+            "I've come back from worse.",
+            "Just need one good hand.",
+        ],
+    },
 }
 
 
@@ -423,6 +556,15 @@ def describe_companion_effect(effect_type, short=False):
     return entry[0] if short else entry[1]
 
 
+def format_effect_value(effect_type, value):
+    """Format a companion's effect value for display."""
+    if "multiplier" in effect_type:
+        return f"x{value:.2f}"
+    if "pct" in effect_type or "chance" in effect_type:
+        return f"{value * 100:.0f}%"
+    return ""
+
+
 def format_hand_summary(result):
     """One-line dim summary of a resolved hand. Returns string or None."""
     if result is None or not isinstance(result, dict):
@@ -439,21 +581,21 @@ def format_hand_summary(result):
     enemy_busted = result.get("enemy_busted", False)
 
     if action == "folded":
-        return f"{C_DIM}Folded. Took {dmg_taken} chip damage.{C_RESET}"
+        return f"{C_DIM}Folded. Lost {dmg_taken} chips.{C_RESET}"
     if action == "natural_push":
         return f"{C_DIM}Both natural 21. Push.{C_RESET}"
     if action == "natural":
-        return f"{C_DIM}Natural 21! Dealt {dmg_dealt} dmg.{C_RESET}"
+        return f"{C_DIM}Natural 21! Took {dmg_dealt} chips from the dead.{C_RESET}"
     if action == "natural_loss":
-        return f"{C_DIM}Shade natural 21. Took {dmg_taken} dmg.{C_RESET}"
+        return f"{C_DIM}Spirit natural 21. Lost {dmg_taken} chips.{C_RESET}"
     if action == "busted":
-        return f"{C_DIM}Busted ({p_val}), enemy had {e_val}. Took {dmg_taken} dmg.{C_RESET}"
+        return f"{C_DIM}Busted ({p_val}), spirit had {e_val}. Lost {dmg_taken} chips.{C_RESET}"
     if won:
         if enemy_busted:
-            return f"{C_DIM}Stood on {p_val}, enemy busted ({e_val}). Dealt {dmg_dealt} dmg.{C_RESET}"
-        return f"{C_DIM}Stood on {p_val} vs {e_val}. Dealt {dmg_dealt} dmg.{C_RESET}"
+            return f"{C_DIM}Stood on {p_val}, spirit busted ({e_val}). Took {dmg_dealt} chips.{C_RESET}"
+        return f"{C_DIM}Stood on {p_val} vs {e_val}. Took {dmg_dealt} chips.{C_RESET}"
     if lost:
-        return f"{C_DIM}Stood on {p_val} vs {e_val}. Took {dmg_taken} dmg.{C_RESET}"
+        return f"{C_DIM}Stood on {p_val} vs {e_val}. Lost {dmg_taken} chips.{C_RESET}"
     # Push
     return f"{C_DIM}Push at {p_val}.{C_RESET}"
 
@@ -465,8 +607,10 @@ class Game:
     def __init__(self):
         self.config = GameConfig()
         self.deck = Deck()
+        self.enemy_deck = Deck()
         self._last_capture_bonus = 0.0
         self._last_capture_bonus_reasons = []
+        self._fight_num = 0
         self.player = Player(
             hp=self.config.player.starting_hp,
             max_hp=self.config.player.starting_hp,
@@ -482,22 +626,23 @@ class Game:
         print(f"  {C_BWHITE}  RULES & REFERENCE{C_RESET}")
         print(f"  {C_BWHITE}{'='*44}{C_RESET}")
         print()
-        print(f"  {C_BWHITE}Goal:{C_RESET} Survive 3 acts (15 fights total).")
-        print(f"  Each fight is a series of blackjack hands.")
-        print(f"  Get closer to 21 than the enemy to deal damage.")
-        print(f"  Go over 21 and you bust (take extra damage).")
+        print(f"  {C_BWHITE}Goal:{C_RESET} Survive 3 acts (15 séances total).")
+        print(f"  Each séance is a series of blackjack hands.")
+        print(f"  Get closer to 21 than the spirit to take their chips.")
+        print(f"  Go over 21 and you bust (lose extra chips).")
+        print(f"  Your deck is yours; the dead draw from their own.")
         print()
         print(f"  {C_BWHITE}Controls:{C_RESET}")
         print(f"    {C_GREEN}\u2192{C_RESET} Hit (draw a card)")
         print(f"    {C_GREEN}\u2190{C_RESET} Stand (keep your hand)")
         print(f"    \u2193 Fold (take {self.config.damage.fold_damage} dmg, costs 1 fold)")
-        print(f"    \u2191 Info panel (Shade, your Shades, deck)")
+        print(f"    \u2191 Info panel (spirit, your Shades, deck)")
         print(f"    r Rules (this screen)")
         print(f"    s Split (pairs only, plays two hands)")
         print()
         print(f"  {C_BWHITE}Split:{C_RESET} When dealt a pair, press s to split into")
         print(f"  two hands. Each gets a new second card and plays")
-        print(f"  separately. Both resolve against the enemy's single")
+        print(f"  separately. Both resolve against the spirit's single")
         print(f"  hand. Lose both and you take damage twice.")
         print()
         print(f"  {C_BWHITE}Folds:{C_RESET} Limited resource. Start with {self.config.fold.starting_folds}.")
@@ -512,9 +657,9 @@ class Game:
         print(f"    Gain {self.config.fold.fold_reward_amount} folds")
         print(f"    Recruit a Shade (normal Shades only)")
         print()
-        print(f"  {C_BWHITE}Shades:{C_RESET} Defeated spirits that fight alongside you.")
+        print(f"  {C_BWHITE}Shades:{C_RESET} Spirits of the dead, bound to serve you.")
         print(f"  Some require specific cards in hand to activate.")
-        print(f"  Gain XP each fight and level up (max Lv5).")
+        print(f"  Gain XP each séance and level up (max Lv5).")
         print()
         print(f"  {C_BWHITE}Enchantments:{C_RESET}")
         print(f"    {C_RED}Fury{C_RESET}   +{self.config.enchantment.fury_damage} bonus damage on wins")
@@ -537,25 +682,40 @@ class Game:
 
     # --- Shade whisper ---
 
-    def _whisper(self, shade_key, **kwargs):
-        """Show a random Shade whisper line in phantom color."""
-        whispers = SHADE_WHISPERS.get(shade_key)
-        if not whispers:
+    def _whisper(self, shade_key, category="proc", **kwargs):
+        """Show a random Shade whisper line in the shade's color."""
+        shade_data = SHADE_WHISPERS.get(shade_key)
+        if not shade_data:
+            return
+        lines = shade_data.get(category, shade_data.get("proc", []))
+        if not lines:
             return
         name = COMPANION_TEMPLATES.get(shade_key, {}).get("name", shade_key)
-        line = random.choice(whispers)
-        # Allow template vars (e.g. {card} for Dutch's peek)
+        color = SHADE_COLORS.get(shade_key, C_PHANTOM)
+        line = random.choice(lines)
         try:
             line = line.format(**kwargs)
         except (KeyError, IndexError):
             pass
-        typewrite(f"  {C_PHANTOM}\"{line}\" -- {name}{C_RESET}", delay=0.02)
+        typewrite(f"  {color}\"{line}\" -- {name}{C_RESET}", delay=0.02)
 
     def _shade_proc(self, shade_name, effect, detail=""):
         """High-visibility callout when a Shade effect actually triggers."""
-        print(f"  {C_BGREEN}◆ SHADE PROC ◆{C_RESET} {C_BWHITE}{shade_name}{C_RESET} -- {effect}")
+        shade_key = shade_name.lower()
+        color = SHADE_COLORS.get(shade_key, C_BGREEN)
+        print(f"  {color}\u25c6 {shade_name}{C_RESET} -- {effect}")
         if detail:
-            print(f"  {C_GREEN}    {detail}{C_RESET}")
+            print(f"  {color}    {detail}{C_RESET}")
+
+    def _shade_chatter(self, category, chance=0.35):
+        """Maybe show an ambient line from a random active companion."""
+        companions = self.player.companions
+        if not companions:
+            return
+        if random.random() > chance:
+            return
+        c = random.choice(companions)
+        self._whisper(c.companion_type, category=category)
 
     @staticmethod
     def _capture_bonus_from_flags(hand_count, had_natural, had_bust, had_fold, high_total_finish):
@@ -653,7 +813,8 @@ class Game:
             active = check_activation(player_cards, c.activation)
             hint = colorize_hint(c.activation)
             if active:
-                parts.append(f"{hint} {C_GREEN}\u2713{C_RESET} {c.name}")
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                parts.append(f"{hint} {shade_c}\u2713 {c.name}{C_RESET}")
             else:
                 raw_hint = activation_hint(c.activation)
                 parts.append(f"{C_DIM}{raw_hint} {c.name}{C_RESET}")
@@ -686,7 +847,7 @@ class Game:
     def _recruit_block_reason(self, enemy):
         """Return why this enemy is not currently recruitable, else None."""
         if enemy.tier != "normal":
-            return "Dealers and Pit Bosses cannot be recruited"
+            return "Dealers and Pit Bosses cannot be bound"
         if not enemy.companion_type:
             return "No recruitable Shade data"
         if enemy.companion_type not in COMPANION_TEMPLATES:
@@ -697,14 +858,6 @@ class Game:
         """Print 2-line decision HUD with damage estimates, risk, enemy threat, companions."""
         est_win, est_loss = self._estimate_damage(p_val, player_cards, enemy)
 
-        # Risk label
-        if bust_pct < 20:
-            risk = f"{C_GREEN}SAFE{C_RESET}"
-        elif bust_pct <= 70:
-            risk = f"{C_AMBER}RISKY{C_RESET}"
-        else:
-            risk = f"{C_RED}DANGER{C_RESET}"
-
         # Bust color
         if bust_pct > 70:
             bust_color = C_RED
@@ -713,7 +866,7 @@ class Game:
         else:
             bust_color = C_GREEN
 
-        line1 = f"  Win ~{est_win}  Lose ~{est_loss}   {bust_color}bust: {bust_pct:.0f}%{C_RESET} {risk}  deck: {deck_ct}"
+        line1 = f"  Win ~{est_win}  Lose ~{est_loss}   {bust_color}bust: {bust_pct:.0f}%{C_RESET}  deck: {deck_ct}"
         print(line1)
 
         threat = self._enemy_threat_brief(enemy)
@@ -722,6 +875,8 @@ class Game:
         if companion:
             line2_parts.append(f"    {companion}")
         print("".join(line2_parts))
+        if self._fight_num:
+            print(f"  {self._journey_map(self._fight_num)}")
 
     # --- Encounter generation ---
 
@@ -786,6 +941,9 @@ class Game:
         bonus_dmg = t.get("bonus_damage", 0) + buffs["bonus_damage"]
         capture_roll = 1.0
         capture_power_mult = 1.0
+        deck_removed = enemy_deck_removed_ranks(rarity)
+        deck_quality = enemy_deck_quality_label(rarity)
+        deck_size = 52 - len(deck_removed)
         if t.get("companion_type"):
             capture_roll = capture_roll_for_rarity(self.config, rarity)
             capture_power_mult = companion_power_multiplier_for_rarity(
@@ -813,6 +971,9 @@ class Game:
             backstab_on_21=t.get("backstab_on_21", False),
             capture_roll=capture_roll,
             capture_power_mult=capture_power_mult,
+            deck_quality=deck_quality,
+            deck_removed_ranks=deck_removed,
+            deck_size=deck_size,
         )
 
     # --- Display helpers ---
@@ -828,7 +989,8 @@ class Game:
             for c in self.player.companions:
                 hint_c = colorize_hint(c.activation)
                 suffix = f" [{hint_c}]" if hint_c else ""
-                print(f"  {C_GREEN}{c.name}{C_RESET} Lv{c.level}{suffix}")
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                print(f"  {shade_c}{c.name}{C_RESET} Lv{c.level}{suffix}")
 
     # --- Damage application ---
 
@@ -910,6 +1072,20 @@ class Game:
             add("")
             add(f"  {C_DIM}No special abilities.{C_RESET}")
 
+        # Spirit deck intel
+        removed = list(enemy.deck_removed_ranks or [])
+        add("")
+        add(
+            f"  {C_BWHITE}Spirit Deck:{C_RESET} {enemy.deck_size} cards  "
+            f"{C_DIM}({enemy.deck_quality}){C_RESET}"
+        )
+        if removed:
+            counts = Counter(removed)
+            detail = ", ".join(f"{r}x{n}" for r, n in sorted(counts.items(), key=lambda kv: RANKS.index(kv[0])))
+            add(f"  {C_DIM}Trimmed ranks: {detail}{C_RESET}")
+        else:
+            add(f"  {C_DIM}No trims (full house stock deck).{C_RESET}")
+
         # --- Companions section ---
         divider()
         if self.player.companions:
@@ -922,13 +1098,7 @@ class Game:
             for c in self.player.companions:
                 effect_label = describe_companion_effect(c.effect_type, short=True)
 
-                # Format effect value
-                if "multiplier" in c.effect_type:
-                    val_str = f"x{c.effect_value:.2f}"
-                elif "pct" in c.effect_type or "chance" in c.effect_type:
-                    val_str = f"{c.effect_value * 100:.0f}%"
-                else:
-                    val_str = ""
+                val_str = format_effect_value(c.effect_type, c.effect_value)
 
                 # Check activation against current hand
                 if c.activation in ("two_red", "two_black"):
@@ -936,7 +1106,8 @@ class Game:
                 else:
                     active = None  # contextual, not card-composition
 
-                line = f"  {C_GREEN}{c.name}{C_RESET} Lv{c.level}"
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                line = f"  {shade_c}{c.name}{C_RESET} Lv{c.level}"
                 if val_str:
                     line += f"  {val_str} {effect_label}"
                 else:
@@ -1024,7 +1195,7 @@ class Game:
 
     def play_hand(self, enemy, hand_num):
         player_cards = [self.deck.draw(), self.deck.draw()]
-        enemy_cards = [self.deck.draw(), self.deck.draw()]
+        enemy_cards = [self.enemy_deck.draw(), self.enemy_deck.draw()]
         has_peek = self.player.get_companion_effect("peek_enemy", player_cards) is not None
 
         hand_label = f"── Hand {hand_num} "
@@ -1037,7 +1208,7 @@ class Game:
         if p_nat or e_nat:
             print_cards("You    ", player_cards, p_val_str(player_cards))
             beat(0.15)
-            print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards))
+            print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards))
             beat(0.5)
             if p_nat and e_nat:
                 print(f"  {C_AMBER}Both natural 21! Push.{C_RESET}")
@@ -1055,7 +1226,7 @@ class Game:
                 return {"action": "natural", "p_val": 21, "e_val": hand_value(enemy_cards),
                         "won": True, "lost": False, "dmg_dealt": max(0, ehp_b - enemy.hp),
                         "dmg_taken": 0, "enemy_busted": False}
-            typewrite(f"  {C_BRED}Shade natural 21!{C_RESET}", delay=0.03)
+            typewrite(f"  {C_BRED}Spirit natural 21!{C_RESET}", delay=0.03)
             beat(0.4)
             php_b = self.player.hp
             dmg = self._calc_loss_damage(21, hand_value(player_cards), enemy, is_natural=True,
@@ -1079,12 +1250,12 @@ class Game:
         if has_peek:
             hole_card = enemy_cards[1]
             hole_str = f"{hole_card.rank}{SUIT_SYM[hole_card.suit]}"
-            print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards),
-                        suffix=f"{C_GREEN}[Dutch]{C_RESET}")
-            self._shade_proc("Dutch", "Peek", f"Revealed hole card: {hole_str}")
+            print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards),
+                        suffix=f"{SHADE_COLORS['dutch']}[Dutch]{C_RESET}")
+            self._shade_proc("Dutch", "Peek", f"Hole card: {hole_str}")
             self._whisper("dutch", card=hole_str)
         else:
-            print_cards("Enemy  ", enemy_cards, hidden_indices={1},
+            print_cards("Dead   ", enemy_cards, hidden_indices={1},
                         suffix=f"{C_DIM}{threshold_str}{C_RESET}")
 
         # --- Split detection ---
@@ -1105,10 +1276,10 @@ class Game:
                 print_cards("You    ", player_cards, p_val_str(player_cards))
                 threshold_str = f"stands at {enemy.hit_threshold}"
                 if has_peek:
-                    print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards),
-                                suffix=f"{C_GREEN}[Dutch]{C_RESET}")
+                    print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards),
+                                suffix=f"{SHADE_COLORS['dutch']}[Dutch]{C_RESET}")
                 else:
-                    print_cards("Enemy  ", enemy_cards, hidden_indices={1},
+                    print_cards("Dead   ", enemy_cards, hidden_indices={1},
                                 suffix=f"{C_DIM}{threshold_str}{C_RESET}")
             split_need_reprint = True
 
@@ -1164,10 +1335,10 @@ class Game:
                 print_cards("You    ", hand_a, p_val_str(hand_a))
                 threshold_str = f"stands at {enemy.hit_threshold}"
                 if has_peek:
-                    print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards),
-                                suffix=f"{C_GREEN}[Dutch]{C_RESET}")
+                    print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards),
+                                suffix=f"{SHADE_COLORS['dutch']}[Dutch]{C_RESET}")
                 else:
-                    print_cards("Enemy  ", enemy_cards, hidden_indices={1},
+                    print_cards("Dead   ", enemy_cards, hidden_indices={1},
                                 suffix=f"{C_DIM}{threshold_str}{C_RESET}")
 
                 hand_a, busted_a, _ = self._player_turn(
@@ -1179,10 +1350,10 @@ class Game:
                 print(f"\n  {C_DIM}{label_b}{C_RESET}")
                 print_cards("You    ", hand_b, p_val_str(hand_b))
                 if has_peek:
-                    print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards),
-                                suffix=f"{C_GREEN}[Dutch]{C_RESET}")
+                    print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards),
+                                suffix=f"{SHADE_COLORS['dutch']}[Dutch]{C_RESET}")
                 else:
-                    print_cards("Enemy  ", enemy_cards, hidden_indices={1},
+                    print_cards("Dead   ", enemy_cards, hidden_indices={1},
                                 suffix=f"{C_DIM}{threshold_str}{C_RESET}")
 
                 hand_b, busted_b, _ = self._player_turn(
@@ -1280,7 +1451,7 @@ class Game:
         if player_busted:
             beat(0.5)
             e_val = hand_value(enemy_cards)
-            print_cards("Enemy  ", enemy_cards, f"{C_AMBER}{e_val}{C_RESET}")
+            print_cards("Dead   ", enemy_cards, f"{C_AMBER}{e_val}{C_RESET}")
             beat(0.3)
             ehp_before = enemy.hp
             php_before = self.player.hp
@@ -1381,10 +1552,10 @@ class Game:
                 print_cards("You    ", player_cards, f"{C_BGREEN}{p_val}{C_RESET}")
                 threshold_str = f"stands at {enemy.hit_threshold}"
                 if has_peek:
-                    print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards),
-                                suffix=f"{C_GREEN}[Dutch]{C_RESET}")
+                    print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards),
+                                suffix=f"{SHADE_COLORS['dutch']}[Dutch]{C_RESET}")
                 else:
-                    print_cards("Enemy  ", enemy_cards, hidden_indices={1},
+                    print_cards("Dead   ", enemy_cards, hidden_indices={1},
                                 suffix=f"{C_DIM}{threshold_str}{C_RESET}")
             need_reprint = True
 
@@ -1449,33 +1620,33 @@ class Game:
         """
         aware = enemy.tier in ("elite", "boss")
         beat(0.5)
-        print(f"\n  {C_AMBER}Enemy reveals...{C_RESET}")
+        print(f"\n  {C_AMBER}The dead reveal...{C_RESET}")
         beat(0.3)
-        print_cards("Enemy  ", enemy_cards, e_val_str(enemy_cards))
+        print_cards("Dead   ", enemy_cards, e_val_str(enemy_cards))
 
         while hand_value(enemy_cards) <= enemy.hit_threshold:
             if aware and p_val and hand_value(enemy_cards) > p_val:
                 break
             beat(0.3)
-            card = self.deck.draw()
+            card = self.enemy_deck.draw()
             enemy_cards.append(card)
-            print(f"  Enemy draws  {show_card(card)}  -> {e_val_str(enemy_cards)}")
+            print(f"  Spirit draws  {show_card(card)}  -> {e_val_str(enemy_cards)}")
 
         for _ in range(enemy.reckless_extra):
             if hand_value(enemy_cards) < 21:
                 if aware and p_val and hand_value(enemy_cards) > p_val:
                     break
                 beat(0.3)
-                card = self.deck.draw()
+                card = self.enemy_deck.draw()
                 enemy_cards.append(card)
-                print(f"  {C_AMBER}Wild Card!{C_RESET}   {show_card(card)}  -> {e_val_str(enemy_cards)}")
+                print(f"  {C_AMBER}Wild Card!{C_RESET}  Spirit draws {show_card(card)}  -> {e_val_str(enemy_cards)}")
 
         e_val = hand_value(enemy_cards)
         enemy_busted = e_val > 21
 
         if enemy_busted:
             beat(0.4)
-            flash_text(f"  {C_BGREEN}SHADE BUSTS! ({e_val}){C_RESET}")
+            flash_text(f"  {C_BGREEN}SPIRIT BUSTS! ({e_val}){C_RESET}")
 
         return enemy_cards, enemy_busted, e_val
 
@@ -1646,26 +1817,26 @@ class Game:
     def show_enemy_status(self, enemy):
         ebar = hp_bar(enemy.hp, enemy.max_hp)
         name = enemy_display_name(enemy)
-        tier_labels = {"normal": "", "elite": " [DEALER]", "boss": " [PIT BOSS]"}
-        tier = tier_labels.get(enemy.tier, "")
+        tier = TIER_LABELS.get(enemy.tier, "")
         print(f"  {name}{tier}  {ebar} {enemy.hp}/{enemy.max_hp}")
 
     def play_fight(self, enemy, fight_num, total, act_num):
+        self._fight_num = fight_num
+        self.enemy_deck = build_enemy_deck_from_removed_ranks(enemy.deck_removed_ranks)
         clear()
         w = 47
         DIV = self._DIVIDER
         lines = []
 
         act_label = f"ACT {act_num}"
-        fight_label = f"Fight {fight_num} of {total}"
+        fight_label = f"Séance {fight_num} of {total}"
         pad = w - 2 - len(act_label) - len(fight_label)
         lines.append(f"  {C_BWHITE}{act_label}{' ' * pad}{fight_label}{C_RESET}")
         lines.append(DIV)
 
         name = enemy_display_name(enemy)
         ebar = hp_bar(enemy.hp, enemy.max_hp, 10)
-        tier_labels = {"normal": "", "elite": " [DEALER]", "boss": " [PIT BOSS]"}
-        tier = tier_labels.get(enemy.tier, "")
+        tier = TIER_LABELS.get(enemy.tier, "")
         lines.append(f"  {name}{tier}  {ebar} {enemy.hp}/{enemy.max_hp}")
         recruit_block = self._recruit_block_reason(enemy)
         if recruit_block:
@@ -1689,7 +1860,8 @@ class Game:
             for c in self.player.companions:
                 hint_c = colorize_hint(c.activation)
                 suffix = f" [{hint_c}]" if hint_c else ""
-                lines.append(f"  {C_GREEN}{c.name}{C_RESET} Lv{c.level}{suffix}")
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                lines.append(f"  {shade_c}{c.name}{C_RESET} Lv{c.level}{suffix}")
 
         max_width = max((plain_len(l) for l in lines if l is not DIV), default=w)
         max_width = max(max_width + 2, w)
@@ -1717,6 +1889,7 @@ class Game:
                 padding = max_width - plain_len(line)
                 print(f"  {frame_color}{v}{C_RESET}{line}{' ' * padding}{frame_color}{v}{C_RESET}")
         print(f"  {frame_color}{bl}{h * max_width}{br}{C_RESET}")
+        self._shade_chatter("fight_start", chance=0.45)
 
         hand_num = 0
         total_dealt = 0
@@ -1746,6 +1919,17 @@ class Game:
             summary = format_hand_summary(result)
             if summary:
                 print(f"\n  {summary}")
+
+            # Shade ambient chatter based on what just happened
+            if result.get("won"):
+                if result.get("enemy_busted"):
+                    self._shade_chatter("enemy_bust", chance=0.40)
+                else:
+                    self._shade_chatter("win", chance=0.25)
+            elif result.get("lost"):
+                self._shade_chatter("loss", chance=0.25)
+            if self.player.alive and self.player.hp <= self.player.max_hp * 0.25:
+                self._shade_chatter("low_hp", chance=0.30)
 
             # Show both HP bars after each hand
             if self.player.alive and enemy.alive:
@@ -1794,12 +1978,38 @@ class Game:
             print(f"  {C_DIM}{hand_num} hands | {total_dealt} dealt | {total_taken} taken{C_RESET}")
             print(f"  {self._journey_map(fight_num)}")
 
-        # Companion level-up and XP display
+        # Companion XP and level-up display
+        xp_per = self.config.companion.xp_per_level
+        xp_gain = self.config.companion.xp_per_fight
+        max_lvl = self.config.companion.max_level
+        if self.player.companions:
+            print()
         for c in self.player.companions:
-            if c.level > prev_levels.get(c.name, 0):
-                print(f"  {C_GREEN}{c.name} reached level {c.level}!{C_RESET}")
-            elif c.level < self.config.companion.max_level:
-                print(f"  {C_DIM}{c.name} {c.xp}/{self.config.companion.xp_per_level} XP{C_RESET}")
+            old_lvl = prev_levels.get(c.name, 0)
+            if c.level > old_lvl:
+                # --- Level-up celebration ---
+                beat(0.3)
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                flash_text(f"  {shade_c}{c.name} \u2192 LEVEL {c.level}!{C_RESET}")
+                beat(0.2)
+                # Show what improved
+                effect_short = describe_companion_effect(c.effect_type, short=True)
+                val_str = format_effect_value(c.effect_type, c.effect_value)
+                if val_str:
+                    print(f"  {C_GREEN}  {effect_short}: {val_str}{C_RESET}")
+                if c.level >= max_lvl:
+                    typewrite(f"  {C_AMBER}  MAX LEVEL{C_RESET}", delay=0.04)
+                else:
+                    xp_bar = xp_bar(c.xp, xp_per, 12)
+                    print(f"  {C_DIM}  {xp_bar} {c.xp}/{xp_per} XP{C_RESET}")
+            elif c.level < max_lvl:
+                # Show XP gain and progress bar
+                xp_bar = xp_bar(c.xp, xp_per, 12)
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                print(f"  {shade_c}{c.name}{C_RESET} +{xp_gain} XP  {xp_bar} {c.xp}/{xp_per}  Lv{c.level}")
+            else:
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                print(f"  {shade_c}{c.name}{C_RESET} Lv{c.level} {C_AMBER}MAX{C_RESET}")
 
         return won
 
@@ -1831,13 +2041,13 @@ class Game:
 
         # Dramatic reveal before the splash
         beat(0.3)
-        typewrite(f"  {C_PHANTOM}A shade stirs...{C_RESET}", delay=0.03)
+        typewrite(f"  {C_PHANTOM}A spirit lingers at the table...{C_RESET}", delay=0.03)
         beat(0.3)
 
         # Build framed splash
         lines = [
             "",
-            f"  {C_BGREEN}SHADE FREED{C_RESET}",
+            f"  {C_BGREEN}SPIRIT UNBOUND{C_RESET}",
             "",
             f"  {C_BWHITE}{template['name']}{C_RESET} [{sig}]",
             f"  {C_PHANTOM}\"{quote}\"{C_RESET}",
@@ -1908,10 +2118,18 @@ class Game:
 
     # --- Post-fight reward ---
 
-    def post_fight_reward(self, enemy):
+    def post_fight_reward(
+        self,
+        enemy,
+        title="REWARD",
+        allow_heal=True,
+        allow_remove=True,
+        allow_enchant=True,
+        allow_fold=True,
+    ):
         print()
         self.show_status()
-        print(f"\n  {C_AMBER}--- REWARD ---{C_RESET}")
+        print(f"\n  {C_AMBER}--- {title} ---{C_RESET}")
 
         # Build options mapped to arrow directions
         arrows = ["left", "right", "down"]
@@ -1920,7 +2138,7 @@ class Game:
 
         # Option: Remove a card
         removable = self.deck.removable_ranks(self.config.reward.min_deck_size)
-        if removable:
+        if allow_remove and removable:
             options.append(("Remove a card", "remove"))
 
         # Option: Heal
@@ -1929,18 +2147,19 @@ class Game:
             if enemy.tier in ("elite", "boss")
             else self.config.reward.heal_amount
         )
-        if self.player.hp < self.player.max_hp:
+        if allow_heal and self.player.hp < self.player.max_hp:
             options.append((f"Heal {heal_amount} chips", "heal"))
 
         # Option: Enchant a card
         ecfg = self.config.enchantment
         enchantable = self.deck.enchantable_cards(1, ecfg.max_per_card)
-        if enchantable:
+        if allow_enchant and enchantable:
             options.append(("Enchant a card", "enchant"))
 
         # Option: Gain folds
         fold_amt = self.config.fold.fold_reward_amount
-        options.append((f"Gain {fold_amt} folds", "fold_reward"))
+        if allow_fold:
+            options.append((f"Gain {fold_amt} folds", "fold_reward"))
 
         if not options:
             print("  No rewards available.")
@@ -2100,7 +2319,7 @@ class Game:
         beat(0.3)
         typewrite(f"  {C_BWHITE}ACT {act_num}{C_RESET}", delay=0.05)
         print()
-        print(f"  {C_DIM}The table goes quiet for a moment.{C_RESET}")
+        print(f"  {C_DIM}The candles gutter. Silence returns.{C_RESET}")
         beat(0.4)
         print()
         healed = self.player.hp - old_hp
@@ -2111,7 +2330,8 @@ class Game:
             for c in self.player.companions:
                 hint_c = colorize_hint(c.activation)
                 suffix = f" [{hint_c}]" if hint_c else ""
-                print(f"  {C_GREEN}{c.name}{C_RESET} Lv{c.level}{suffix}")
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                print(f"  {shade_c}{c.name}{C_RESET} Lv{c.level}{suffix}")
             print()
         crt_wipe()
         pause()
@@ -2168,16 +2388,14 @@ class Game:
         crt_wipe()
         print()
         beat(0.3)
-        print(f"  {C_GREEN}Beat the house at blackjack to survive.{C_RESET}")
+        print(f"  {C_GREEN}Summon the dead. Beat them at cards.{C_RESET}")
         beat(0.1)
-        print(f"  {C_GREEN}Get closer to 21 than your opponent.{C_RESET}")
+        print(f"  {C_GREEN}Closer to 21 wins. Go over and you bust.{C_RESET}")
         beat(0.1)
-        print(f"  {C_GREEN}Bust and you lose chips instead.{C_RESET}")
+        print(f"  {C_GREEN}Bind the Shades you defeat. They'll play for you.{C_RESET}")
         print()
         beat(0.1)
-        print(f"  {C_GREEN}Defeat Shades. Recruit them. Stack the deck.{C_RESET}")
-        beat(0.1)
-        print(f"  {C_GREEN}Survive 3 acts and earn your freedom.{C_RESET}")
+        print(f"  {C_GREEN}Survive 3 acts and walk free.{C_RESET}")
         print()
         print(f"  {C_DIM}\u2192 hit  \u2190 stand  \u2193 fold  \u2191 info  r rules{C_RESET}")
         print()
@@ -2199,12 +2417,12 @@ class Game:
                 beat(0.5)
                 static_burst(width=49, height=4, duration=0.2)
                 print()
-                shake_line(f"{C_BRED}F L A T L I N E D{C_RESET}", intensity=3, count=5, delay=0.05)
+                shake_line(f"{C_BRED}B U R I E D{C_RESET}", intensity=3, count=5, delay=0.05)
                 print()
                 beat(0.3)
-                typewrite(f"  {C_DIM}Fell in fight {i + 1} of {len(encounters)}.{C_RESET}", delay=0.03)
+                typewrite(f"  {C_DIM}Claimed at séance {i + 1} of {len(encounters)}.{C_RESET}", delay=0.03)
                 beat(0.2)
-                typewrite(f"  {C_DIM}Busted by: {enemy.name}{C_RESET}", delay=0.03)
+                typewrite(f"  {C_DIM}Taken by: {enemy.name}{C_RESET}", delay=0.03)
                 print()
                 crt_wipe()
                 self.show_final()
@@ -2213,6 +2431,15 @@ class Game:
             if won:
                 self.recruitment_screen(enemy)
                 self.post_fight_reward(enemy)
+                if enemy.tier == "boss":
+                    self.post_fight_reward(
+                        enemy,
+                        title="BOSS BONUS",
+                        allow_heal=True,
+                        allow_remove=False,
+                        allow_enchant=False,
+                        allow_fold=True,
+                    )
 
         clear()
         print()
@@ -2221,9 +2448,9 @@ class Game:
         typewrite(f"  {C_BGREEN}F R E E D O M{C_RESET}", delay=0.06)
         print()
         beat(0.4)
-        print(f"  {C_GREEN}Survived all {len(encounters)} encounters.{C_RESET}")
+        print(f"  {C_GREEN}Survived all {len(encounters)} séances.{C_RESET}")
         beat(0.2)
-        typewrite(f"  {C_GREEN}The house has no claim on you.{C_RESET}", delay=0.03)
+        typewrite(f"  {C_GREEN}The dead have no claim on you.{C_RESET}", delay=0.03)
         print()
         color = hp_color(self.player.hp, self.player.max_hp)
         print(f"  Final Chips: {color}{self.player.hp}/{self.player.max_hp}{C_RESET}")
@@ -2238,7 +2465,8 @@ class Game:
                 effect = describe_companion_effect(c.effect_type)
                 hint_c = colorize_hint(c.activation)
                 suffix = f" [{hint_c}]" if hint_c else ""
-                print(f"    {C_GREEN}{c.name}{C_RESET} Lv{c.level} -- {effect}: {c.effect_value:.1f}{suffix}")
+                shade_c = SHADE_COLORS.get(c.companion_type, C_GREEN)
+                print(f"    {shade_c}{c.name}{C_RESET} Lv{c.level} -- {effect}: {c.effect_value:.1f}{suffix}")
         if self.player.reserve_companions:
             print(f"\n  Reserve Shades:")
             for c in self.player.reserve_companions:

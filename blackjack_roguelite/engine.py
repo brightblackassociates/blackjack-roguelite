@@ -273,9 +273,24 @@ RARITY_BUFFS = {
 }
 
 RARITY_WEIGHTS = {
-    "normal": [("common", 70), ("rare", 20), ("elite", 8), ("epic", 2)],
+    "normal": [("common", 80), ("rare", 12), ("elite", 6), ("epic", 2)],
     "elite":  [("rare", 60), ("elite", 30), ("epic", 10)],
     "boss":   [("rare", 20), ("elite", 50), ("epic", 30)],
+}
+
+# Enemy deck quality by rarity. Better rarities run cleaner decks.
+ENEMY_DECK_TRIMS = {
+    "common": [],
+    "rare": ["2", "3"],
+    "elite": ["2", "3", "4", "5"],
+    "epic": ["2", "2", "3", "3", "4", "5"],
+}
+
+ENEMY_DECK_LABELS = {
+    "common": "house stock",
+    "rare": "stacked",
+    "elite": "rigged",
+    "epic": "deadly rig",
 }
 
 
@@ -302,6 +317,9 @@ class Enemy:
     backstab_on_21: bool = False   # Guaranteed crit when enemy hand is exactly 21
     capture_roll: float = 1.0      # Per-enemy shade roll (capture power variance)
     capture_power_mult: float = 1.0
+    deck_quality: str = "house stock"
+    deck_removed_ranks: List[str] = field(default_factory=list)
+    deck_size: int = 52
 
     @property
     def alive(self) -> bool:
@@ -315,6 +333,24 @@ def capture_roll_for_rarity(config: GameConfig, rarity: str) -> float:
     if hi < lo:
         lo, hi = hi, lo
     return random.uniform(lo, hi)
+
+
+def enemy_deck_removed_ranks(rarity: str) -> List[str]:
+    """Return rank removals that define enemy deck quality for rarity."""
+    return list(ENEMY_DECK_TRIMS.get(rarity, ENEMY_DECK_TRIMS["common"]))
+
+
+def enemy_deck_quality_label(rarity: str) -> str:
+    return ENEMY_DECK_LABELS.get(rarity, ENEMY_DECK_LABELS["common"])
+
+
+def build_enemy_deck_from_removed_ranks(removed_ranks: List[str]) -> Deck:
+    """Construct an enemy deck from base 52 minus provided rank removals."""
+    deck = Deck()
+    for rank in removed_ranks:
+        deck.remove_rank(rank)
+    deck.reset()
+    return deck
 
 
 def capture_chance_for_rarity(config: GameConfig, rarity: str, capture_roll: float = 1.0) -> float:
@@ -521,6 +557,7 @@ class CombatEngine:
     def __init__(self, config: GameConfig):
         self.config = config
         self.deck = Deck()
+        self.enemy_deck = Deck()
 
     @staticmethod
     def _clamp(val: float, lo: float, hi: float) -> float:
@@ -550,10 +587,10 @@ class CombatEngine:
             target = int(self._clamp(target, 12, 19))
 
             while hand_value(enemy_cards) <= target:
-                if self.deck.bust_probability(enemy_cards) >= 0.35:
+                if self.enemy_deck.bust_probability(enemy_cards) >= 0.35:
                     telemetry["risk_hits"] += 1
                 telemetry["hits"] += 1
-                enemy_cards.append(self.deck.draw())
+                enemy_cards.append(self.enemy_deck.draw())
             telemetry["stands"] += 1
             e_val = hand_value(enemy_cards)
             if p_val and e_val > p_val:
@@ -571,7 +608,7 @@ class CombatEngine:
                     target += 1
                 target = int(self._clamp(target, 13, 20))
 
-                bust_prob = self.deck.bust_probability(enemy_cards)
+                bust_prob = self.enemy_deck.bust_probability(enemy_cards)
                 tolerance = 0.30 if enemy.tier == "elite" else 0.27
                 if enemy.reckless_extra > 0:
                     tolerance += 0.05
@@ -585,7 +622,7 @@ class CombatEngine:
                     if bust_prob >= 0.35:
                         telemetry["risk_hits"] += 1
                     telemetry["hits"] += 1
-                    enemy_cards.append(self.deck.draw())
+                    enemy_cards.append(self.enemy_deck.draw())
                     continue
                 if e_val < target and bust_prob <= tolerance:
                     if p_val and e_val <= p_val:
@@ -593,7 +630,7 @@ class CombatEngine:
                     if bust_prob >= 0.35:
                         telemetry["risk_hits"] += 1
                     telemetry["hits"] += 1
-                    enemy_cards.append(self.deck.draw())
+                    enemy_cards.append(self.enemy_deck.draw())
                     continue
                 chase_tol = tolerance - 0.01
                 if p_val >= 19:
@@ -603,7 +640,7 @@ class CombatEngine:
                     if bust_prob >= 0.35:
                         telemetry["risk_hits"] += 1
                     telemetry["hits"] += 1
-                    enemy_cards.append(self.deck.draw())
+                    enemy_cards.append(self.enemy_deck.draw())
                     continue
                 telemetry["stands"] += 1
                 if p_val and e_val > p_val:
@@ -613,11 +650,11 @@ class CombatEngine:
         # Reckless identity: extra push after normal behavior.
         for _ in range(enemy.reckless_extra):
             if hand_value(enemy_cards) < 21:
-                if self.deck.bust_probability(enemy_cards) >= 0.35:
+                if self.enemy_deck.bust_probability(enemy_cards) >= 0.35:
                     telemetry["risk_hits"] += 1
                 telemetry["hits"] += 1
                 telemetry["reckless_hits"] += 1
-                enemy_cards.append(self.deck.draw())
+                enemy_cards.append(self.enemy_deck.draw())
 
         return telemetry
 
@@ -744,7 +781,7 @@ class CombatEngine:
     def play_hand(self, player: Player, enemy: Enemy, strategy) -> HandResult:
         """Play a single hand of blackjack combat."""
         player_cards = [self.deck.draw(), self.deck.draw()]
-        enemy_cards = [self.deck.draw(), self.deck.draw()]
+        enemy_cards = [self.enemy_deck.draw(), self.enemy_deck.draw()]
         decision_points: List[DecisionPoint] = []
         companion_effects: List[str] = []
         highlights: List[str] = []
@@ -1066,6 +1103,7 @@ class CombatEngine:
         hands = []
         total_dealt = 0.0
         total_taken = 0.0
+        self.enemy_deck = build_enemy_deck_from_removed_ranks(enemy.deck_removed_ranks)
 
         while player.alive and enemy.alive:
             result = self.play_hand(player, enemy, strategy)
@@ -1221,6 +1259,9 @@ class RunEngine:
         bonus_dmg = t.get("bonus_damage", 0) + buffs["bonus_damage"]
         capture_roll = 1.0
         capture_power_mult = 1.0
+        deck_removed = enemy_deck_removed_ranks(rarity)
+        deck_quality = enemy_deck_quality_label(rarity)
+        deck_size = 52 - len(deck_removed)
 
         if t.get("companion_type"):
             capture_roll = capture_roll_for_rarity(self.config, rarity)
@@ -1253,6 +1294,9 @@ class RunEngine:
             backstab_on_21=t.get("backstab_on_21", False),
             capture_roll=capture_roll,
             capture_power_mult=capture_power_mult,
+            deck_quality=deck_quality,
+            deck_removed_ranks=deck_removed,
+            deck_size=deck_size,
         )
 
     def play_run(self, strategy, capture_strategy, reward_strategy=None,
@@ -1293,107 +1337,110 @@ class RunEngine:
 
             # --- Reward phase (after won fights) ---
             if result.player_won and reward_strategy:
-                # Build available reward options
-                can_remove = bool(self.combat.deck.removable_ranks(
-                    self.config.reward.min_deck_size
-                ))
+                reward_picks = 2 if enemy.tier == "boss" else 1
+                # Invariants: these don't change between reward picks
                 heal_amount = (
                     self.config.reward.heal_amount_elite
                     if enemy.tier in ("elite", "boss")
                     else self.config.reward.heal_amount
                 )
-                can_heal = player.hp < player.max_hp
+                can_capture = bool(enemy.companion_type and enemy.tier == "normal")
+                has_class = player.class_id is not None
 
-                # Capture opportunity on normal shades; full slots can still
-                # be handled by reward strategy via companion replacement.
-                can_capture = (enemy.companion_type and enemy.tier == "normal")
+                for pick_i in range(reward_picks):
+                    is_boss_bonus_pick = enemy.tier == "boss" and pick_i > 0
+                    # Re-evaluate availability each pick; prior choices may
+                    # have changed deck size, player HP, talent state, etc.
+                    can_remove = bool(self.combat.deck.removable_ranks(
+                        self.config.reward.min_deck_size
+                    )) and (not is_boss_bonus_pick)
+                    can_heal = (player.hp < player.max_hp)
+                    can_enchant = bool(self.combat.deck.enchantable_cards(
+                        1, self.config.enchantment.max_per_card
+                    )) and (not is_boss_bonus_pick)
+                    non_maxed = get_non_maxed_talents(player)
+                    can_class_upgrade = bool(non_maxed) and has_class and (not is_boss_bonus_pick)
+                    pick_can_capture = can_capture and (not is_boss_bonus_pick)
+                    pick_heal_amount = heal_amount if not is_boss_bonus_pick else max(4, heal_amount // 2)
 
-                # Enchant opportunity
-                can_enchant = bool(self.combat.deck.enchantable_cards(
-                    1, self.config.enchantment.max_per_card
-                ))
-
-                non_maxed = get_non_maxed_talents(player)
-                can_class_upgrade = bool(non_maxed) and player.class_id is not None
-
-                choice = reward_strategy.choose_reward(
-                    player, self.combat.deck, enemy,
-                    can_remove=can_remove,
-                    can_heal=can_heal,
-                    heal_amount=heal_amount,
-                    can_capture=can_capture,
-                    can_enchant=can_enchant,
-                    can_fold_reward=True,
-                    can_class_upgrade=can_class_upgrade,
-                )
-
-                if choice == "remove_card":
-                    ranks = self.combat.deck.removable_ranks(self.config.reward.min_deck_size)
-                    if ranks:
-                        rank = reward_strategy.choose_rank_to_remove(
-                            ranks, self.combat.deck.rank_counts()
-                        )
-                        if rank and self.combat.deck.remove_rank(rank):
-                            cards_removed += 1
-                elif choice == "enchant" and can_enchant:
-                    ecfg = self.config.enchantment
-                    cards = self.combat.deck.enchantable_cards(
-                        ecfg.cards_offered, ecfg.max_per_card
+                    choice = reward_strategy.choose_reward(
+                        player, self.combat.deck, enemy,
+                        can_remove=can_remove,
+                        can_heal=can_heal,
+                        heal_amount=pick_heal_amount,
+                        can_capture=pick_can_capture,
+                        can_enchant=can_enchant,
+                        can_fold_reward=True,
+                        can_class_upgrade=can_class_upgrade,
                     )
-                    if cards:
-                        card = reward_strategy.choose_card_to_enchant(
-                            cards, self.combat.deck
-                        )
-                        if card:
-                            offered = random.sample(
-                                ENCHANTMENT_TYPES,
-                                min(ecfg.types_offered, len(ENCHANTMENT_TYPES)),
-                            )
-                            etype = reward_strategy.choose_enchantment_type(
-                                offered, card
-                            )
-                            if etype and self.combat.deck.enchant_card(
-                                card, etype, ecfg.max_per_card
-                            ):
-                                enchantments_applied += 1
-                elif choice == "fold_reward":
-                    player.folds += self.config.fold.fold_reward_amount
-                    fold_rewards += 1
-                elif choice == "heal":
-                    player.heal(heal_amount)
-                elif choice == "capture" and can_capture:
-                    captured = False
-                    capture_bonus, _ = capture_bonus_from_fight(result)
-                    capture_chance = min(
-                        0.95,
-                        capture_chance_for_rarity(
-                            self.config, enemy.rarity, enemy.capture_roll
-                        ) + capture_bonus,
-                    )
-                    # Roll for capture success
-                    if random.random() < capture_chance:
-                        template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
-                        if template:
-                            comp = Companion(
-                                name=template["name"],
-                                companion_type=enemy.companion_type,
-                                effect_type=template["effect_type"],
-                                base_value=template["base_value"],
-                                per_level=template["per_level"],
-                                activation=template.get("activation", "always"),
-                                source_rarity=enemy.rarity,
-                                power_multiplier=enemy.capture_power_mult,
-                            )
-                            player.add_captured_companion(comp)
-                            result.companion_captured = enemy.companion_type
-                            captured = True
-                elif choice == "class_upgrade" and can_class_upgrade:
-                    talent_key = reward_strategy.choose_class_talent(player)
-                    if talent_key and apply_talent_upgrade(player, talent_key):
-                        class_upgrades += 1
 
-                result.reward_chosen = choice
-                rewards_chosen.append(choice)
+                    if pick_i == 0:
+                        result.reward_chosen = choice
+
+                    if choice == "remove_card":
+                        ranks = self.combat.deck.removable_ranks(self.config.reward.min_deck_size)
+                        if ranks:
+                            rank = reward_strategy.choose_rank_to_remove(
+                                ranks, self.combat.deck.rank_counts()
+                            )
+                            if rank and self.combat.deck.remove_rank(rank):
+                                cards_removed += 1
+                    elif choice == "enchant" and can_enchant:
+                        ecfg = self.config.enchantment
+                        cards = self.combat.deck.enchantable_cards(
+                            ecfg.cards_offered, ecfg.max_per_card
+                        )
+                        if cards:
+                            card = reward_strategy.choose_card_to_enchant(
+                                cards, self.combat.deck
+                            )
+                            if card:
+                                offered = random.sample(
+                                    ENCHANTMENT_TYPES,
+                                    min(ecfg.types_offered, len(ENCHANTMENT_TYPES)),
+                                )
+                                etype = reward_strategy.choose_enchantment_type(
+                                    offered, card
+                                )
+                                if etype and self.combat.deck.enchant_card(
+                                    card, etype, ecfg.max_per_card
+                                ):
+                                    enchantments_applied += 1
+                    elif choice == "fold_reward":
+                        player.folds += self.config.fold.fold_reward_amount
+                        fold_rewards += 1
+                    elif choice == "heal":
+                        player.heal(pick_heal_amount)
+                    elif choice == "capture" and pick_can_capture:
+                        capture_bonus, _ = capture_bonus_from_fight(result)
+                        capture_chance = min(
+                            0.95,
+                            capture_chance_for_rarity(
+                                self.config, enemy.rarity, enemy.capture_roll
+                            ) + capture_bonus,
+                        )
+                        # Roll for capture success
+                        if random.random() < capture_chance:
+                            template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
+                            if template:
+                                comp = Companion(
+                                    name=template["name"],
+                                    companion_type=enemy.companion_type,
+                                    effect_type=template["effect_type"],
+                                    base_value=template["base_value"],
+                                    per_level=template["per_level"],
+                                    activation=template.get("activation", "always"),
+                                    source_rarity=enemy.rarity,
+                                    power_multiplier=enemy.capture_power_mult,
+                                )
+                                player.add_captured_companion(comp)
+                                result.companion_captured = enemy.companion_type
+                    elif choice == "class_upgrade" and can_class_upgrade:
+                        talent_key = reward_strategy.choose_class_talent(player)
+                        if talent_key and apply_talent_upgrade(player, talent_key):
+                            class_upgrades += 1
+
+                    rewards_chosen.append(choice)
 
             fights.append(result)
 
