@@ -1256,6 +1256,41 @@ class Game:
         enemy.hp = min(enemy.max_hp, enemy.hp + heal)
         print(f"  {C_RED}Lich drains {heal} HP!{C_RESET} ({enemy.hp}/{enemy.max_hp})")
 
+    # --- Journey map ---
+
+    def _journey_map(self, fight_num):
+        """Render a visual map of progress through all acts."""
+        cfg = self.config.run
+        per_act = cfg.fights_per_act + cfg.elites_per_act + 1
+        dash = f"{C_DIM}\u2500{C_RESET}"
+
+        act_strings = []
+        idx = 0
+
+        for act in range(cfg.acts):
+            nodes = []
+            for local in range(per_act):
+                idx += 1
+                # Pick symbols by fight type
+                if local < cfg.fights_per_act:
+                    done, todo = "\u25cf", "\u25cb"
+                elif local < cfg.fights_per_act + cfg.elites_per_act:
+                    done, todo = "\u25c6", "\u25c7"
+                else:
+                    done, todo = "\u2605", "\u2606"
+
+                if idx < fight_num:
+                    nodes.append(f"{C_GREEN}{done}{C_RESET}")
+                elif idx == fight_num:
+                    nodes.append(f"{C_BGREEN}{done}{C_RESET}")
+                else:
+                    nodes.append(f"{C_DIM}{todo}{C_RESET}")
+
+            act_strings.append(dash.join(nodes))
+
+        sep = f" {C_DIM}\u2502{C_RESET} "
+        return sep.join(act_strings)
+
     # --- Fight loop ---
 
     def show_enemy_status(self, enemy):
@@ -1341,6 +1376,7 @@ class Game:
         if won:
             print(f"\n  {enemy_display_name(enemy)} defeated!")
             print(f"  {C_DIM}{hand_num} hands | {total_dealt} dealt | {total_taken} taken{C_RESET}")
+            print(f"  {self._journey_map(fight_num)}")
 
         # Companion level-up and XP display
         for c in self.player.companions:
