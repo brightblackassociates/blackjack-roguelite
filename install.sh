@@ -41,13 +41,12 @@ chmod +x "$INSTALL_DIR/blackjack"
 # Symlink into PATH if possible
 if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
     ln -sf "$INSTALL_DIR/blackjack" "$BIN_LINK"
-    echo "  Installed! Run anytime with: blackjack"
+    CMD="blackjack"
 else
-    echo "  Installed to $INSTALL_DIR"
-    echo "  Run with: ~/.blackjack-roguelite/blackjack"
+    CMD="~/.blackjack-roguelite/blackjack"
 fi
 
+echo "  Done! To play, type:"
 echo ""
-
-# Launch immediately
-exec "$INSTALL_DIR/blackjack"
+echo "    $CMD"
+echo ""
