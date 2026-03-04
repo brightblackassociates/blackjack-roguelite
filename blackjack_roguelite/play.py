@@ -617,6 +617,8 @@ class Game:
         self._last_capture_bonus_reasons = []
         self._fight_num = 0
         self._silenced = False
+        self._last_bust_prob = 0.0  # Bust probability when player last stood
+        self._hex_bleed_counter = 0  # Cumulative hex bleed for current fight
         self.player = Player(
             hp=self.config.player.starting_hp,
             max_hp=self.config.player.starting_hp,
@@ -661,7 +663,7 @@ class Game:
         print()
         print(f"  {C_BWHITE}Rewards{C_RESET} (after each win, pick one):")
         print(f"    Remove a card (thin your deck, raise avg hand)")
-        print(f"    Enchant a card (fury/siphon/ward)")
+        print(f"    Enchant a card (fury/siphon/ward/echo/gambit/hex)")
         print(f"    Heal chips")
         print(f"    Gain {self.config.fold.fold_reward_amount} folds")
         print(f"    Recruit a Shade (normal Shades only)")
@@ -677,9 +679,12 @@ class Game:
         print(f"  Gain XP each séance and level up (max Lv5).")
         print()
         print(f"  {C_BWHITE}Enchantments:{C_RESET}")
-        print(f"    {C_RED}Fury{C_RESET}   +{self.config.enchantment.fury_damage} bonus damage on wins")
-        print(f"    {C_GREEN}Siphon{C_RESET} Heal {self.config.enchantment.siphon_heal} per enchanted card in hand")
-        print(f"    {C_AMBER}Ward{C_RESET}   -{self.config.enchantment.ward_reduction} damage on losses")
+        print(f"    {C_RED}Fury{C_RESET}     +{self.config.enchantment.fury_damage} bonus damage on wins")
+        print(f"    {C_GREEN}Siphon{C_RESET}   Heal {self.config.enchantment.siphon_heal} per enchanted card in hand")
+        print(f"    {C_AMBER}Ward{C_RESET}     -{self.config.enchantment.ward_reduction} damage on losses")
+        print(f"    {C_GREEN}Echo{C_RESET}     Duplicates other enchantments on same card")
+        print(f"    {C_GREEN}Gambit{C_RESET}   +dmg that scales with bust risk when you stand")
+        print(f"    {C_RED}Hex{C_RESET}      +{self.config.enchantment.hex_bleed_per_play} bleed/round, stacks all fight")
         print(f"  Stacks diminish: +{self.config.enchantment.diminishing:.0%} per extra copy.")
         print()
         print(f"  {C_BWHITE}Shade abilities:{C_RESET}")
@@ -758,12 +763,21 @@ class Game:
     # --- Enchantment helpers ---
 
     def _count_enchantments(self, cards):
-        """Count enchantment types across cards in hand."""
-        counts = {"fury": 0, "siphon": 0, "ward": 0}
+        """Count enchantment types across cards in hand, with echo duplication."""
+        counts = {"fury": 0, "siphon": 0, "ward": 0, "echo": 0, "gambit": 0, "hex": 0}
         for card in cards:
             for ench in self.deck.get_enchantments(card):
                 if ench in counts:
                     counts[ench] += 1
+        # Echo: each echo duplicates other enchantments on the same card
+        if counts["echo"] > 0:
+            for card in cards:
+                card_enchs = self.deck.get_enchantments(card)
+                card_echoes = card_enchs.count("echo")
+                if card_echoes > 0:
+                    for ench in card_enchs:
+                        if ench != "echo" and ench in counts:
+                            counts[ench] += card_echoes
         return counts
 
     def _ench_total(self, base, count):
@@ -776,12 +790,18 @@ class Game:
         return total
 
     def _apply_siphon(self, player_cards):
-        """Apply siphon heal from enchanted cards in hand."""
+        """Apply siphon heal and hex bleed stacking from enchanted cards in hand."""
         ench = self._count_enchantments(player_cards)
+        if ench["echo"] > 0:
+            print(f"  {C_GREEN}Echo x{ench['echo']}: duplicating enchantments{C_RESET}")
         if ench["siphon"] > 0:
             heal = int(self._ench_total(self.config.enchantment.siphon_heal, ench["siphon"]))
             self.player.heal(heal)
             print(f"  {C_GREEN}Siphon x{ench['siphon']}: heal {heal}!{C_RESET} ({self.player.hp}/{self.player.max_hp})")
+        if ench["hex"] > 0:
+            added = ench["hex"] * self.config.enchantment.hex_bleed_per_play
+            self._hex_bleed_counter += added
+            print(f"  {C_RED}Hex x{ench['hex']}: +{added} bleed (total: {self._hex_bleed_counter}){C_RESET}")
 
     def base_damage(self, winner_val, loser_val):
         cfg = self.config.damage
@@ -1167,7 +1187,7 @@ class Game:
 
         ench_summary = self.deck.enchanted_cards_summary()
         if ench_summary:
-            ench_counts = {"fury": 0, "siphon": 0, "ward": 0}
+            ench_counts = {"fury": 0, "siphon": 0, "ward": 0, "echo": 0, "gambit": 0, "hex": 0}
             for _card, enchs in ench_summary:
                 for e in enchs:
                     if e in ench_counts:
@@ -1414,6 +1434,7 @@ class Game:
                 # Hit or stand chosen on the split prompt -- fall through to normal play
                 # Put the choice back by handling it inline
                 if choice == "left":
+                    self._last_bust_prob = bust_pct / 100.0
                     print(f"  Stand at {C_BGREEN}{hand_value(player_cards)}{C_RESET}.")
                     # Skip player turn, go straight to enemy
                     player_busted = False
@@ -1611,12 +1632,17 @@ class Game:
                 return player_cards, False, True
 
             if choice == "left":
+                self._last_bust_prob = bust_pct / 100.0
                 print(f"  Stand at {C_BGREEN}{p_val}{C_RESET}.")
                 break
 
             card = self.deck.draw()
             player_cards.append(card)
             print(f"  Drew {show_card(card)}  = {p_val_str(player_cards)}")
+
+        # Auto-stand at 21 means max bust risk
+        if not player_busted and hand_value(player_cards) == 21:
+            self._last_bust_prob = 1.0
 
         return player_cards, player_busted, False
 
@@ -1730,10 +1756,17 @@ class Game:
             self._whisper("maggie")
         if player_cards:
             ench = self._count_enchantments(player_cards)
+            if ench["echo"] > 0:
+                print(f"  {C_GREEN}Echo x{ench['echo']}: duplicating enchantments{C_RESET}")
             if ench["fury"] > 0:
                 fury_bonus = self._ench_total(self.config.enchantment.fury_damage, ench["fury"])
                 dmg += fury_bonus
                 print(f"  {C_GREEN}+{fury_bonus:.0f} Fury x{ench['fury']} -> {dmg:.0f}{C_RESET}")
+            if ench["gambit"] > 0:
+                ecfg = self.config.enchantment
+                gambit_bonus = ench["gambit"] * (ecfg.gambit_base_damage + ecfg.gambit_bust_scaling * self._last_bust_prob)
+                dmg += gambit_bonus
+                print(f"  {C_GREEN}+{gambit_bonus:.1f} Gambit x{ench['gambit']} ({self._last_bust_prob*100:.0f}% bust risk) -> {dmg:.0f}{C_RESET}")
         # Player crit
         if random.random() < self.config.damage.player_crit_chance:
             dmg *= self.config.damage.crit_multiplier
@@ -2359,6 +2392,7 @@ class Game:
         hand_num = 0
         total_dealt = 0
         total_taken = 0
+        self._hex_bleed_counter = 0
         prev_levels = {c.name: c.level for c in self.player.companions}
         had_natural = False
         had_bust = False
@@ -2402,6 +2436,16 @@ class Game:
                 self.show_enemy_status(enemy)
                 self.show_status()
                 print(f"  {C_DIM}{'─ ' * 20}{C_RESET}")
+
+            # Hex bleed tick (end of round)
+            if self._hex_bleed_counter > 0 and enemy.alive:
+                beat(0.2)
+                enemy.hp = max(0, enemy.hp - self._hex_bleed_counter)
+                total_dealt += self._hex_bleed_counter
+                print(f"  {C_RED}Hex bleed: -{self._hex_bleed_counter} chips!{C_RESET} ({enemy.hp}/{enemy.max_hp})")
+                if not enemy.alive:
+                    beat(0.4)
+                    typewrite(f"  {C_BGREEN}The curse consumes them!{C_RESET}", delay=0.03)
 
             # Poison (every hand)
             if enemy.poison_per_hand and enemy.alive and self.player.alive:
@@ -2741,13 +2785,16 @@ class Game:
         chosen_card = card_map[choice]
 
         # Offer enchantment types
-        all_types = ["fury", "siphon", "ward"]
-        offered = random.sample(all_types, min(ecfg.types_offered, len(all_types)))
+        from .engine import ENCHANTMENT_TYPES
+        offered = random.sample(ENCHANTMENT_TYPES, min(ecfg.types_offered, len(ENCHANTMENT_TYPES)))
 
         type_labels = {
             "fury": f"Fury (+{ecfg.fury_damage} dmg on wins)",
             "siphon": f"Siphon (heal {ecfg.siphon_heal} any hand)",
             "ward": f"Ward (-{ecfg.ward_reduction} dmg on losses)",
+            "echo": "Echo (duplicates other enchantments on same card)",
+            "gambit": f"Gambit (+dmg scaling with bust risk when you stand)",
+            "hex": f"Hex (+{ecfg.hex_bleed_per_play} bleed per round, stacks all fight)",
         }
 
         arrows = ["left", "right", "down"]
