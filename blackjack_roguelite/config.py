@@ -104,6 +104,10 @@ class EnchantmentConfig:
     fury_damage: int = 2         # Base bonus damage on wins with fury card
     ward_reduction: int = 1      # Base damage reduction on losses with ward card
     diminishing: float = 0.5     # Each additional same-type worth this fraction
+    # New enchantment types
+    gambit_base_damage: int = 1  # Base bonus damage from gambit
+    gambit_bust_scaling: float = 4.0  # Multiplied by bust probability when you stood
+    hex_bleed_per_play: int = 1  # Bleed counter increment per hex card played
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +342,7 @@ ENEMY_TEMPLATES = {
         "hit_threshold": 17,
         "tier": "boss",
         "companion_type": "",
-        "forced_extra_hits": 1,
+        "silence_shades": True,
     },
     "boss_hollow": {
         "name": "The Hollow",
@@ -347,6 +351,7 @@ ENEMY_TEMPLATES = {
         "tier": "boss",
         "companion_type": "",
         "drain": True,
+        "reap_shade_on_21": True,
     },
     "boss_croupier": {
         "name": "The Croupier",
@@ -411,73 +416,46 @@ COMPANION_TEMPLATES = {
 
 
 # ---------------------------------------------------------------------------
-# Class templates (player identity / second progression lane)
-# ---------------------------------------------------------------------------
-CLASS_TEMPLATES = {
-    "thief": {
-        "name": "Thief",
-        "base_stats": {
-            "crit_chance": 0.08,
-            "crit_chance_high_hand": 0.08,
-        },
-        "talents": {
-            "precision":  {"name": "Precision",  "stat": "crit_chance",          "per_rank": 0.04, "max_ranks": 5},
-            "lethality":  {"name": "Lethality",  "stat": "crit_mult_bonus",      "per_rank": 0.15, "max_ranks": 5},
-            "evasion":    {"name": "Evasion",    "stat": "damage_reduction_pct",  "per_rank": 0.04, "max_ranks": 4},
-            "sleight":    {"name": "Sleight",    "stat": "max_folds_bonus",       "per_rank": 0.5,  "max_ranks": 4},
-        },
-    },
-    "warrior": {
-        "name": "Warrior",
-        "base_stats": {"damage_reduction_pct": 0.08, "max_hp_bonus": 10},
-        "talents": {
-            "strength":  {"name": "Strength",  "stat": "damage_pct",           "per_rank": 0.05, "max_ranks": 6},
-            "fortify":   {"name": "Fortify",   "stat": "damage_reduction_pct", "per_rank": 0.05, "max_ranks": 4},
-            "vitality":  {"name": "Vitality",  "stat": "max_hp_bonus",         "per_rank": 10,   "max_ranks": 5},
-            "grit":      {"name": "Grit",      "stat": "max_folds_bonus",      "per_rank": 0.5,  "max_ranks": 6},
-        },
-    },
-    "mage": {
-        "name": "Mage",
-        "base_stats": {"effect_power_pct": 0.10, "peek_always": True},
-        "talents": {
-            "spellpower":   {"name": "Spellpower",   "stat": "effect_power_pct",       "per_rank": 0.08, "max_ranks": 5},
-            "arcane_ward":  {"name": "Arcane Ward",   "stat": "bust_penalty_reduction", "per_rank": 0.05, "max_ranks": 5},
-            "focus":        {"name": "Focus",         "stat": "damage_pct",             "per_rank": 0.04, "max_ranks": 5},
-            "stabilize":    {"name": "Stabilize",     "stat": "unbust_bonus_chance",    "per_rank": 0.06, "max_ranks": 5},
-        },
-    },
-}
-
-_STAT_LABELS = {
-    "crit_chance":           lambda v: f"+{v:.0%} crit",
-    "crit_chance_high_hand": lambda v: f"+{v:.0%} crit on 18+",
-    "damage_reduction_pct":  lambda v: f"{v:.0%} damage reduction",
-    "max_hp_bonus":          lambda v: f"+{v} HP",
-    "effect_power_pct":      lambda v: f"+{v:.0%} effect power",
-    "peek_always":           lambda v: "always peek" if v else None,
-}
-
-
-def format_base_stats(base_stats: dict) -> str:
-    parts = []
-    for stat, value in base_stats.items():
-        fmt = _STAT_LABELS.get(stat)
-        if fmt is None:
-            continue
-        label = fmt(value)
-        if label is not None:
-            parts.append(label)
-    return ", ".join(parts)
-
-
-# ---------------------------------------------------------------------------
 # Fold resource
 # ---------------------------------------------------------------------------
 @dataclass
 class FoldConfig:
     starting_folds: int = 3
     fold_reward_amount: int = 2
+
+
+# ---------------------------------------------------------------------------
+# Map (branching node system per act)
+# ---------------------------------------------------------------------------
+@dataclass
+class MapConfig:
+    vigil_heal_pct: float = 0.25
+    vigil_commune_xp: int = 20
+    vigil_offering_folds: int = 2
+    vigil_offering_hp_cost: int = 8
+    crossroads_win_heal: int = 5
+    crossroads_loss_damage: int = 5
+
+
+GRAVE_CARDS = {
+    "dead_ace":   {"name": "Dead Man's Ace",  "rank": "A",  "suit": "S", "enchantment": "siphon",
+                   "desc": "An ace that heals when played."},
+    "bone_ten":   {"name": "Bone Ten",        "rank": "10", "suit": "C", "enchantment": "fury",
+                   "desc": "Hits hard when you win."},
+    "ghost_jack": {"name": "Ghost Jack",      "rank": "J",  "suit": "D", "enchantment": "ward",
+                   "desc": "Absorbs pain when you lose."},
+    "iron_king":  {"name": "Iron King",       "rank": "K",  "suit": "S", "enchantment": "fury",
+                   "desc": "Heavy iron. Hits heavier."},
+    "pale_queen": {"name": "Pale Queen",      "rank": "Q",  "suit": "H", "enchantment": "siphon",
+                   "desc": "Draws life from the fallen."},
+}
+
+
+ACT_NAMES = [
+    "The Shallow Plots",
+    "The Dealer's Row",
+    "The Bone Parlor",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +470,7 @@ class GameConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     enchantment: EnchantmentConfig = field(default_factory=EnchantmentConfig)
     fold: FoldConfig = field(default_factory=FoldConfig)
+    map: MapConfig = field(default_factory=MapConfig)
     experience_targets: list = field(
         default_factory=lambda: list(DEFAULT_EXPERIENCE_TARGETS)
     )

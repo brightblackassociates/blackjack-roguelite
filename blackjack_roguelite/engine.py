@@ -4,6 +4,7 @@ Everything that makes the game tick.
 """
 import random
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import List, Optional, Dict
 
 from . import config as _cfg
@@ -48,7 +49,7 @@ def is_natural_21(cards: List[Card]) -> bool:
     return len(cards) == 2 and hand_value(cards) == 21
 
 
-ENCHANTMENT_TYPES = ["fury", "siphon", "ward"]
+ENCHANTMENT_TYPES = ["fury", "siphon", "ward", "echo", "gambit", "hex"]
 
 
 class Deck:
@@ -137,7 +138,7 @@ class Deck:
         return [(c, list(e)) for c, e in self._enchantments.items() if e]
 
 
-REWARD_TYPES = ["remove_card", "heal", "capture", "enchant", "fold_reward", "class_upgrade"]
+REWARD_TYPES = ["remove_card", "heal", "capture", "enchant", "fold_reward"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,89 +167,6 @@ class Companion:
         while self.xp >= xp_per_level and self.level < max_level:
             self.xp -= xp_per_level
             self.level += 1
-
-
-@dataclass
-class ClassStats:
-    damage_pct: float = 0.0
-    crit_chance: float = 0.0
-    crit_chance_high_hand: float = 0.0
-    crit_mult_bonus: float = 0.0
-    damage_reduction_pct: float = 0.0
-    max_hp_bonus: int = 0
-    max_folds_bonus: int = 0
-    effect_power_pct: float = 0.0
-    bust_penalty_reduction: float = 0.0
-    unbust_bonus_chance: float = 0.0
-    peek_always: bool = False
-
-
-def build_class_stats(class_id, talents=None) -> ClassStats:
-    """Build ClassStats from template base_stats + accumulated talent ranks."""
-    if class_id is None:
-        return ClassStats()
-    template = _cfg.CLASS_TEMPLATES[class_id]
-    base = template["base_stats"]
-    stats = ClassStats(
-        damage_pct=base.get("damage_pct", 0.0),
-        crit_chance=base.get("crit_chance", 0.0),
-        crit_chance_high_hand=base.get("crit_chance_high_hand", 0.0),
-        crit_mult_bonus=base.get("crit_mult_bonus", 0.0),
-        damage_reduction_pct=base.get("damage_reduction_pct", 0.0),
-        max_hp_bonus=base.get("max_hp_bonus", 0),
-        max_folds_bonus=base.get("max_folds_bonus", 0),
-        effect_power_pct=base.get("effect_power_pct", 0.0),
-        bust_penalty_reduction=base.get("bust_penalty_reduction", 0.0),
-        unbust_bonus_chance=base.get("unbust_bonus_chance", 0.0),
-        peek_always=base.get("peek_always", False),
-    )
-    if talents:
-        talent_defs = template["talents"]
-        for key, rank in talents.items():
-            if key in talent_defs and rank > 0:
-                td = talent_defs[key]
-                current = getattr(stats, td["stat"])
-                setattr(stats, td["stat"], current + td["per_rank"] * rank)
-    stats.max_folds_bonus = int(stats.max_folds_bonus)
-    stats.max_hp_bonus = int(stats.max_hp_bonus)
-    return stats
-
-
-def apply_talent_upgrade(player, talent_key) -> bool:
-    """Increment a talent rank, rebuild class_stats, apply deltas. Returns False if maxed."""
-    if player.class_id is None:
-        return False
-    template = _cfg.CLASS_TEMPLATES[player.class_id]
-    talent_def = template["talents"].get(talent_key)
-    if not talent_def:
-        return False
-    current_rank = player.class_talents.get(talent_key, 0)
-    if current_rank >= talent_def["max_ranks"]:
-        return False
-    old_hp = player.class_stats.max_hp_bonus
-    old_folds = player.class_stats.max_folds_bonus
-    player.class_talents[talent_key] = current_rank + 1
-    player.class_stats = build_class_stats(player.class_id, player.class_talents)
-    hp_delta = player.class_stats.max_hp_bonus - old_hp
-    if hp_delta > 0:
-        player.max_hp += hp_delta
-        player.hp += hp_delta
-    folds_delta = player.class_stats.max_folds_bonus - old_folds
-    if folds_delta > 0:
-        player.folds += folds_delta
-    return True
-
-
-def get_non_maxed_talents(player) -> List[str]:
-    """Return talent keys where current rank < max_ranks."""
-    if player.class_id is None:
-        return []
-    template = _cfg.CLASS_TEMPLATES[player.class_id]
-    result = []
-    for key, td in template["talents"].items():
-        if player.class_talents.get(key, 0) < td["max_ranks"]:
-            result.append(key)
-    return result
 
 
 def check_activation(cards: List[Card], activation: str) -> bool:
@@ -315,6 +233,8 @@ class Enemy:
     crit_chance: float = 0.0       # Chance to crit on wins
     crit_multiplier: float = 1.5   # Crit damage multiplier
     backstab_on_21: bool = False   # Guaranteed crit when enemy hand is exactly 21
+    silence_shades: bool = False   # Suppress all player companion effects
+    reap_shade_on_21: bool = False  # Kill a random player shade when enemy hits 21
     capture_roll: float = 1.0      # Per-enemy shade roll (capture power variance)
     capture_power_mult: float = 1.0
     deck_quality: str = "house stock"
@@ -383,9 +303,7 @@ class Player:
     max_companion_slots: int = 3
     gold: int = 0
     folds: int = 0
-    class_id: Optional[str] = None
-    class_stats: ClassStats = field(default_factory=ClassStats)
-    class_talents: Dict[str, int] = field(default_factory=dict)
+    final_wager_used: bool = False
 
     @property
     def alive(self) -> bool:
@@ -404,15 +322,10 @@ class Player:
             if c.effect_type == effect_type:
                 if cards is not None and not check_activation(cards, c.activation):
                     return None
-                value = c.effect_value
-                if self.class_stats.effect_power_pct and effect_type != "peek_enemy":
-                    value *= (1 + self.class_stats.effect_power_pct)
-                return value
+                return c.effect_value
         return None
 
     def has_peek(self, cards=None):
-        if self.class_stats.peek_always:
-            return True
         return self.get_companion_effect("peek_enemy", cards) is not None
 
     def can_capture(self) -> bool:
@@ -423,6 +336,19 @@ class Player:
 
     def total_companions(self) -> int:
         return len(self.companions) + len(self.reserve_companions)
+
+    def can_final_wager(self) -> bool:
+        return (not self.final_wager_used) and self.total_companions() >= 3
+
+    def trigger_final_wager(self) -> bool:
+        """Sacrifice all shades to survive at 1 HP. Returns True if triggered."""
+        if not self.can_final_wager():
+            return False
+        self.companions.clear()
+        self.reserve_companions.clear()
+        self.final_wager_used = True
+        self.hp = max(1, self.hp)
+        return True
 
     def add_captured_companion(self, comp: Companion) -> str:
         """Add a captured companion to active or reserve roster.
@@ -483,6 +409,7 @@ class HandResult:
     companion_effects: List[str] = field(default_factory=list)
     highlights: List[str] = field(default_factory=list)
     siphon_heal: int = 0
+    hex_stacks: int = 0
     was_split: bool = False
     split_results: List['HandResult'] = field(default_factory=list)
     enemy_ai: Dict[str, int] = field(default_factory=dict)
@@ -514,8 +441,7 @@ class RunResult:
     enchantments_applied: int = 0
     fold_rewards: int = 0
     rewards_chosen: List[str] = field(default_factory=list)
-    class_upgrades: int = 0
-    class_id: Optional[str] = None
+    final_wager_used: bool = False
 
 
 def capture_bonus_from_fight(fight: FightResult) -> tuple[float, list[str]]:
@@ -558,6 +484,7 @@ class CombatEngine:
         self.config = config
         self.deck = Deck()
         self.enemy_deck = Deck()
+        self._last_bust_probability = 0.0  # Bust prob when player last stood
 
     @staticmethod
     def _clamp(val: float, lo: float, hi: float) -> float:
@@ -663,14 +590,15 @@ class CombatEngine:
         # Sub-hands don't see enemy cards -- just use card[0] value
         visible_enemy = 0  # not relevant for sub-hand decisions
         forced_hits = enemy.forced_extra_hits
+        silenced = enemy.silence_shades
         decisions = []
         busted = False
 
         while True:
             val = hand_value(sub_cards)
             if val > 21:
-                unbust = (player.get_companion_effect("unbust_chance", sub_cards) or 0.0) \
-                         + player.class_stats.unbust_bonus_chance
+                unbust = (0.0 if silenced else
+                          (player.get_companion_effect("unbust_chance", sub_cards) or 0.0))
                 unbust = min(unbust, 0.80)
                 if unbust > 0 and random.random() < unbust:
                     sub_cards.pop()
@@ -678,6 +606,7 @@ class CombatEngine:
                 busted = True
                 break
             if val == 21:
+                self._last_bust_probability = 1.0
                 break
 
             bust_prob = self.deck.bust_probability(sub_cards)
@@ -691,6 +620,7 @@ class CombatEngine:
             decisions.append(DecisionPoint(val, bust_prob, decision, visible_enemy, is_tense))
 
             if decision == "stand":
+                self._last_bust_probability = bust_prob
                 break
             sub_cards.append(self.deck.draw())
 
@@ -701,8 +631,7 @@ class CombatEngine:
         companion_effects = []
         if player_busted:
             dmg = self._damage_taken(e_val, p_val, False, player, companion_effects, player_cards, enemy=enemy)
-            effective_bust = max(1.0, self.config.damage.bust_penalty_multiplier - player.class_stats.bust_penalty_reduction)
-            dmg *= effective_bust
+            dmg *= self.config.damage.bust_penalty_multiplier
             return 0, dmg, "lose"
         if enemy_busted:
             dmg = self._damage_dealt(p_val, e_val, False, player, companion_effects, player_cards, enemy=enemy)
@@ -842,12 +771,14 @@ class CombatEngine:
             return self._play_split_hand(player, enemy, player_cards, enemy_cards, strategy)
 
         # --- What the player can see ---
-        if player.has_peek(player_cards):
+        silenced = enemy.silence_shades
+        if not silenced and player.has_peek(player_cards):
             visible_enemy = hand_value(enemy_cards)
         else:
             visible_enemy = enemy_cards[0].value
 
         # --- Player turn ---
+        self._last_bust_probability = 0.0
         forced_hits = enemy.forced_extra_hits
         player_busted = False
 
@@ -855,8 +786,8 @@ class CombatEngine:
             p_val = hand_value(player_cards)
             if p_val > 21:
                 # Try unbust (companion + class bonus)
-                unbust = (player.get_companion_effect("unbust_chance", player_cards) or 0.0) \
-                         + player.class_stats.unbust_bonus_chance
+                unbust = (0.0 if silenced else
+                          (player.get_companion_effect("unbust_chance", player_cards) or 0.0))
                 unbust = min(unbust, 0.80)
                 if unbust > 0 and random.random() < unbust:
                     player_cards.pop()
@@ -866,6 +797,7 @@ class CombatEngine:
                 player_busted = True
                 break
             if p_val == 21:
+                self._last_bust_probability = 1.0  # At 21, any hit busts
                 break
 
             bust_prob = self.deck.bust_probability(player_cards)
@@ -884,6 +816,7 @@ class CombatEngine:
             )
 
             if decision == "stand":
+                self._last_bust_probability = bust_prob
                 break
 
             player_cards.append(self.deck.draw())
@@ -912,8 +845,7 @@ class CombatEngine:
         if player_busted:
             dmg = self._damage_taken(e_val, p_val, False, player, companion_effects,
                                      player_cards, enemy=enemy)
-            effective_bust = max(1.0, self.config.damage.bust_penalty_multiplier - player.class_stats.bust_penalty_reduction)
-            dmg *= effective_bust
+            dmg *= self.config.damage.bust_penalty_multiplier
             return HandResult(
                 player_cards, enemy_cards, p_val, e_val,
                 True, False, False, False, 0, dmg, "lose",
@@ -983,10 +915,11 @@ class CombatEngine:
     def _damage_dealt(self, p_val, e_val, is_natural, player, effects_log,
                       player_cards=None, enemy=None):
         damage = self._base_damage(p_val, e_val)
+        silenced = enemy.silence_shades if enemy else False
 
         if is_natural:
             # Sable: standalone multiplier on natural 21
-            cat_mult = player.get_companion_effect("natural_21_multiplier", player_cards)
+            cat_mult = None if silenced else player.get_companion_effect("natural_21_multiplier", player_cards)
             if cat_mult:
                 damage *= cat_mult
                 effects_log.append(f"Sable: natural 21 ({cat_mult:.1f}x)")
@@ -998,21 +931,15 @@ class CombatEngine:
             damage *= self.config.damage.margin_bonus_multiplier
 
         # Maggie: multiplicative damage on wins (needs activation condition)
-        imp_mult = player.get_companion_effect("damage_multiplier", player_cards)
+        imp_mult = None if silenced else player.get_companion_effect("damage_multiplier", player_cards)
         if imp_mult:
             damage *= imp_mult
             effects_log.append(f"Maggie: {imp_mult:.2f}x damage")
 
-        # Class damage bonus
-        if player.class_stats.damage_pct:
-            damage *= (1 + player.class_stats.damage_pct)
-
-        # Player crit (base + class bonus + high-hand conditional)
-        crit_chance = self.config.damage.player_crit_chance + player.class_stats.crit_chance
-        if player_cards and hand_value(player_cards) >= 18:
-            crit_chance += player.class_stats.crit_chance_high_hand
+        # Player crit
+        crit_chance = self.config.damage.player_crit_chance
         if random.random() < crit_chance:
-            crit_mult = self.config.damage.crit_multiplier * (1 + player.class_stats.crit_mult_bonus)
+            crit_mult = self.config.damage.crit_multiplier
             damage *= crit_mult
             effects_log.append(f"CRIT! x{crit_mult:.1f}")
 
@@ -1035,16 +962,12 @@ class CombatEngine:
                 effects_log.append(f"Enemy CRIT! x{enemy.crit_multiplier:.1f}")
 
         # Priest: percentage damage reduction (needs activation condition)
-        reduction_pct = player.get_companion_effect("damage_reduction_pct", player_cards)
+        silenced = enemy.silence_shades if enemy else False
+        reduction_pct = None if silenced else player.get_companion_effect("damage_reduction_pct", player_cards)
         if reduction_pct:
             reduced = damage * reduction_pct
             damage = max(0, damage - reduced)
             effects_log.append(f"Priest: -{reduction_pct*100:.0f}% ({reduced:.0f} blocked)")
-
-        # Class damage reduction (multiplicative with Shield Turtle, capped 0.35)
-        if player.class_stats.damage_reduction_pct:
-            class_dr = min(player.class_stats.damage_reduction_pct, 0.35)
-            damage *= (1 - class_dr)
 
         return damage
 
@@ -1066,36 +989,69 @@ class CombatEngine:
             return result
 
         cfg = self.config.enchantment
-        fury_count = siphon_count = ward_count = 0
+
+        # Count raw enchantments on cards in hand
+        raw_counts = {"fury": 0, "siphon": 0, "ward": 0, "echo": 0, "gambit": 0, "hex": 0}
         for card in result.player_cards:
             for ench in self.deck.get_enchantments(card):
-                if ench == "fury":
-                    fury_count += 1
-                elif ench == "siphon":
-                    siphon_count += 1
-                elif ench == "ward":
-                    ward_count += 1
+                if ench in raw_counts:
+                    raw_counts[ench] += 1
 
-        ep_mult = 1.0
-        if player and player.class_stats.effect_power_pct:
-            ep_mult = 1 + player.class_stats.effect_power_pct
+        # Echo: each echo duplicates all other enchantments on the same card
+        echo_count = raw_counts["echo"]
+        if echo_count > 0:
+            for card in result.player_cards:
+                card_enchs = self.deck.get_enchantments(card)
+                card_echoes = card_enchs.count("echo")
+                if card_echoes > 0:
+                    for ench in card_enchs:
+                        if ench != "echo" and ench in raw_counts:
+                            raw_counts[ench] += card_echoes
+            result.companion_effects.append(f"Echo x{echo_count}: duplicating enchantments")
+
+        fury_count = raw_counts["fury"]
+        siphon_count = raw_counts["siphon"]
+        ward_count = raw_counts["ward"]
+        gambit_count = raw_counts["gambit"]
+        hex_count = raw_counts["hex"]
 
         if fury_count > 0 and result.outcome == "win":
-            bonus = self._ench_total(cfg.fury_damage, fury_count, cfg.diminishing) * ep_mult
+            bonus = self._ench_total(cfg.fury_damage, fury_count, cfg.diminishing)
             result.damage_dealt += bonus
             result.companion_effects.append(f"Fury x{fury_count}: +{bonus:.0f} dmg")
 
         if ward_count > 0 and result.outcome == "lose":
-            reduction = self._ench_total(cfg.ward_reduction, ward_count, cfg.diminishing) * ep_mult
+            reduction = self._ench_total(cfg.ward_reduction, ward_count, cfg.diminishing)
             result.damage_taken = max(0, result.damage_taken - reduction)
             result.companion_effects.append(f"Ward x{ward_count}: -{reduction:.0f} dmg")
 
         if siphon_count > 0:
-            heal = int(self._ench_total(cfg.siphon_heal, siphon_count, cfg.diminishing) * ep_mult)
+            heal = int(self._ench_total(cfg.siphon_heal, siphon_count, cfg.diminishing))
             result.siphon_heal = heal
             result.companion_effects.append(f"Siphon x{siphon_count}: heal {heal}")
 
+        # Gambit: bonus damage scaling with bust probability at time of stand
+        if gambit_count > 0 and result.outcome == "win":
+            bust_prob = self._last_bust_probability
+            gambit_bonus = gambit_count * (cfg.gambit_base_damage + cfg.gambit_bust_scaling * bust_prob)
+            result.damage_dealt += gambit_bonus
+            result.companion_effects.append(
+                f"Gambit x{gambit_count}: +{gambit_bonus:.1f} dmg ({bust_prob*100:.0f}% bust risk)")
+
+        # Hex: increment the fight's bleed counter per hex card played
+        if hex_count > 0:
+            result.hex_stacks = hex_count
+            result.companion_effects.append(f"Hex x{hex_count}: +{hex_count} bleed")
+
         return result
+
+    @staticmethod
+    def _apply_player_damage(player: Player, damage: int) -> bool:
+        """Apply damage and trigger final wager if lethal. Returns True if wager used."""
+        player.take_damage(int(damage))
+        if player.hp <= 0 and player.trigger_final_wager():
+            return True
+        return False
 
     # --- Fight (multiple hands against one enemy) ---
 
@@ -1103,6 +1059,7 @@ class CombatEngine:
         hands = []
         total_dealt = 0.0
         total_taken = 0.0
+        hex_bleed_counter = 0  # Cumulative bleed from hex cards played
         self.enemy_deck = build_enemy_deck_from_removed_ranks(enemy.deck_removed_ranks)
 
         while player.alive and enemy.alive:
@@ -1112,7 +1069,8 @@ class CombatEngine:
             # --- Fold: take fold_damage, but poison/rage still tick ---
             if result.outcome == "fold":
                 fold_dmg = int(result.damage_taken)
-                player.take_damage(fold_dmg)
+                if self._apply_player_damage(player, fold_dmg):
+                    result.highlights.append("final_wager")
                 total_taken += fold_dmg
             else:
                 # --- Shell: absorb damage dealt to enemy ---
@@ -1128,7 +1086,8 @@ class CombatEngine:
                     total_dealt += result.damage_dealt
                 elif result.outcome == "lose":
                     dmg = int(result.damage_taken) + enemy.bonus_damage
-                    player.take_damage(dmg)
+                    if self._apply_player_damage(player, dmg):
+                        result.highlights.append("final_wager")
                     total_taken += dmg
                     # Drain: enemy heals for damage dealt
                     if enemy.drain:
@@ -1140,9 +1099,21 @@ class CombatEngine:
             if result.siphon_heal > 0 and player.alive:
                 player.heal(result.siphon_heal)
 
+            # --- Hex bleed: accumulate and tick at end of round ---
+            if result.hex_stacks > 0:
+                hex_bleed_counter += result.hex_stacks * self.config.enchantment.hex_bleed_per_play
+            if hex_bleed_counter > 0 and enemy.alive:
+                enemy.hp = max(0, enemy.hp - hex_bleed_counter)
+                total_dealt += hex_bleed_counter
+                result.companion_effects.append(
+                    f"Hex bleed: {hex_bleed_counter} dmg")
+                if not enemy.alive:
+                    result.highlights.append("hex_lethal")
+
             # --- Poison: damage every hand regardless (including folds) ---
             if enemy.poison_per_hand > 0 and enemy.alive:
-                player.take_damage(enemy.poison_per_hand)
+                if self._apply_player_damage(player, enemy.poison_per_hand):
+                    result.highlights.append("final_wager")
                 total_taken += enemy.poison_per_hand
                 result.highlights.append("poison_tick")
 
@@ -1156,6 +1127,13 @@ class CombatEngine:
             # --- Clutch win: winning when near death ---
             if result.outcome == "win" and player.hp <= player.max_hp * 0.20:
                 result.highlights.append("clutch_win")
+
+            # --- Reap: kill a shade when enemy hits 21 ---
+            if (enemy.reap_shade_on_21 and result.enemy_value == 21
+                    and player.companions):
+                victim = random.choice(player.companions)
+                player.companions.remove(victim)
+                result.highlights.append("shade_reaped")
 
             # --- Rage: escalate after each hand (including folds) ---
             if enemy.rage_per_hand > 0:
@@ -1187,56 +1165,180 @@ class CombatEngine:
 
 
 # ---------------------------------------------------------------------------
+# Map system (branching node graph per act)
+# ---------------------------------------------------------------------------
+class NodeType(Enum):
+    GRAVE = "grave"
+    MAUSOLEUM = "mausoleum"
+    BOSS = "boss"
+    BARROW = "barrow"
+    VIGIL = "vigil"
+    CROSSROADS = "crossroads"
+
+
+COMBAT_NODE_TYPES = {NodeType.GRAVE, NodeType.MAUSOLEUM, NodeType.BOSS}
+NON_COMBAT_NODE_TYPES = {NodeType.BARROW, NodeType.VIGIL, NodeType.CROSSROADS}
+
+
+@dataclass
+class MapNode:
+    node_id: int
+    node_type: NodeType
+    layer: int
+    children: List[int] = field(default_factory=list)
+    enemy_key: Optional[str] = None
+    enemy_name: Optional[str] = None
+    visited: bool = False
+    act: int = 0
+
+
+@dataclass
+class ActMap:
+    act_num: int
+    nodes: List[MapNode] = field(default_factory=list)
+    boss_revealed: bool = False
+
+    def get_node(self, node_id: int) -> Optional[MapNode]:
+        for n in self.nodes:
+            if n.node_id == node_id:
+                return n
+        return None
+
+    def start_node(self) -> Optional[MapNode]:
+        return self.nodes[0] if self.nodes else None
+
+    def get_children(self, node_id: int) -> List[MapNode]:
+        node = self.get_node(node_id)
+        if not node:
+            return []
+        return [self.get_node(cid) for cid in node.children if self.get_node(cid)]
+
+    def layers(self) -> Dict[int, List[MapNode]]:
+        result: Dict[int, List[MapNode]] = {}
+        for n in self.nodes:
+            result.setdefault(n.layer, []).append(n)
+        return result
+
+
+def _draw_varied(pool, count):
+    """Draw encounters with minimal repeats while preserving randomness."""
+    if count <= 0 or not pool:
+        return []
+    if count <= len(pool):
+        picks = pool[:]
+        random.shuffle(picks)
+        return picks[:count]
+    picks = []
+    bag = []
+    last = None
+    while len(picks) < count:
+        if not bag:
+            bag = pool[:]
+            random.shuffle(bag)
+            if last is not None and len(bag) > 1 and bag[-1] == last:
+                bag[-1], bag[-2] = bag[-2], bag[-1]
+        pick = bag.pop()
+        picks.append(pick)
+        last = pick
+    return picks
+
+
+def generate_act_map(act_num: int, config: GameConfig) -> ActMap:
+    """Build a branching map for one act.
+
+    Layer pattern (7 layers, 5 fights, 2 branch points):
+        0: Grave (normal)
+        1: BRANCH -- 2 of {Barrow, Vigil, Crossroads}
+        2: Grave (normal)
+        3: Grave (normal)
+        4: BRANCH -- 2-3 of {Barrow, Vigil, Crossroads}
+        5: Mausoleum (elite)
+        6: Boss
+
+    Combat layers always have exactly 1 node.
+    Branch layers have 2-3 alternative non-combat nodes.
+    All nodes in layer N connect to all nodes in layer N+1.
+    """
+    normals = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier", "normal") == "normal"]
+    elites = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier") == "elite"]
+    bosses = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier") == "boss"]
+
+    normal_picks = _draw_varied(normals, 3)
+    elite_pick = _draw_varied(elites, 1)
+    boss_pick = [random.choice(bosses)] if bosses else elite_pick[:1]
+
+    node_id = 0
+    nodes: List[MapNode] = []
+
+    def make_combat_node(layer, enemy_key, node_type):
+        nonlocal node_id
+        tmpl = _cfg.ENEMY_TEMPLATES[enemy_key]
+        n = MapNode(
+            node_id=node_id, node_type=node_type, layer=layer,
+            enemy_key=enemy_key, enemy_name=tmpl["name"], act=act_num,
+        )
+        node_id += 1
+        nodes.append(n)
+        return n
+
+    def make_branch_nodes(layer, count):
+        nonlocal node_id
+        branch_types = [NodeType.BARROW, NodeType.VIGIL, NodeType.CROSSROADS]
+        random.shuffle(branch_types)
+        picks = branch_types[:count]
+        branch_nodes = []
+        for nt in picks:
+            n = MapNode(node_id=node_id, node_type=nt, layer=layer, act=act_num)
+            node_id += 1
+            nodes.append(n)
+            branch_nodes.append(n)
+        return branch_nodes
+
+    # Layer 0: Grave (normal 1)
+    make_combat_node(0, normal_picks[0], NodeType.GRAVE)
+
+    # Layer 1: BRANCH -- 2 non-combat nodes
+    make_branch_nodes(1, 2)
+
+    # Layer 2: Grave (normal 2)
+    make_combat_node(2, normal_picks[1], NodeType.GRAVE)
+
+    # Layer 3: Grave (normal 3)
+    make_combat_node(3, normal_picks[2], NodeType.GRAVE)
+
+    # Layer 4: BRANCH -- 2-3 non-combat nodes (later acts bias toward 3)
+    branch_count = 3 if random.random() < 0.25 + act_num * 0.15 else 2
+    make_branch_nodes(4, branch_count)
+
+    # Layer 5: Mausoleum (elite)
+    if elite_pick:
+        make_combat_node(5, elite_pick[0], NodeType.MAUSOLEUM)
+
+    # Layer 6: Boss
+    make_combat_node(6, boss_pick[0], NodeType.BOSS)
+
+    # Wire up: all nodes in layer N connect to all nodes in layer N+1
+    layer_map: Dict[int, List[MapNode]] = {}
+    for n in nodes:
+        layer_map.setdefault(n.layer, []).append(n)
+    sorted_layers = sorted(layer_map.keys())
+    for i in range(len(sorted_layers) - 1):
+        current_layer = layer_map[sorted_layers[i]]
+        next_layer = layer_map[sorted_layers[i + 1]]
+        next_ids = [n.node_id for n in next_layer]
+        for n in current_layer:
+            n.children = list(next_ids)
+
+    return ActMap(act_num=act_num, nodes=nodes)
+
+
+# ---------------------------------------------------------------------------
 # Run engine (full roguelite run)
 # ---------------------------------------------------------------------------
 class RunEngine:
     def __init__(self, config: GameConfig):
         self.config = config
         self.combat = CombatEngine(config)
-
-    @staticmethod
-    def _draw_varied(pool, count):
-        """Draw encounters with minimal repeats while preserving randomness."""
-        if count <= 0 or not pool:
-            return []
-
-        # Common case: sample without replacement.
-        if count <= len(pool):
-            picks = pool[:]
-            random.shuffle(picks)
-            return picks[:count]
-
-        # Fallback when count exceeds pool size: reshuffle in cycles and
-        # avoid an immediate back-to-back repeat across cycle boundaries.
-        picks = []
-        bag = []
-        last = None
-        while len(picks) < count:
-            if not bag:
-                bag = pool[:]
-                random.shuffle(bag)
-                if last is not None and len(bag) > 1 and bag[-1] == last:
-                    bag[-1], bag[-2] = bag[-2], bag[-1]
-            pick = bag.pop()
-            picks.append(pick)
-            last = pick
-        return picks
-
-    def _generate_encounters(self):
-        """Build the encounter list for a full run."""
-        normals = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier", "normal") == "normal"]
-        elites = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier") == "elite"]
-        bosses = [k for k, v in _cfg.ENEMY_TEMPLATES.items() if v.get("tier") == "boss"]
-
-        encounters = []
-        for act in range(self.config.run.acts):
-            for key in self._draw_varied(normals, self.config.run.fights_per_act):
-                encounters.append((key, act))
-            for key in self._draw_varied(elites, self.config.run.elites_per_act):
-                encounters.append((key, act))
-            if bosses:
-                encounters.append((random.choice(bosses), act))
-        return encounters
 
     @staticmethod
     def _roll_rarity(tier: str) -> str:
@@ -1292,6 +1394,8 @@ class RunEngine:
             drain=t.get("drain", False),
             crit_chance=t.get("crit_chance", 0.0),
             backstab_on_21=t.get("backstab_on_21", False),
+            silence_shades=t.get("silence_shades", False),
+            reap_shade_on_21=t.get("reap_shade_on_21", False),
             capture_roll=capture_roll,
             capture_power_mult=capture_power_mult,
             deck_quality=deck_quality,
@@ -1299,159 +1403,245 @@ class RunEngine:
             deck_size=deck_size,
         )
 
+    # ------------------------------------------------------------------
+    # Simulated non-combat node handlers
+    # ------------------------------------------------------------------
+    def _sim_barrow(self, player, reward_strategy):
+        """Barrow: always bury (remove) the lowest removable rank."""
+        ranks = self.combat.deck.removable_ranks(self.config.reward.min_deck_size)
+        if ranks and reward_strategy:
+            rank = reward_strategy.choose_rank_to_remove(
+                ranks, self.combat.deck.rank_counts()
+            )
+            if rank and self.combat.deck.remove_rank(rank):
+                return 1
+        return 0
+
+    def _sim_vigil(self, player):
+        """Vigil: heal if <50% HP, else commune (give companions XP)."""
+        hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+        if hp_pct < 0.50:
+            heal = int(player.max_hp * self.config.map.vigil_heal_pct)
+            player.heal(heal)
+        else:
+            for c in player.companions:
+                c.gain_xp(
+                    self.config.map.vigil_commune_xp,
+                    self.config.companion.xp_per_level,
+                    self.config.companion.max_level,
+                )
+
+    def _sim_crossroads(self, player, strategy, capture_strategy):
+        """Crossroads: play a phantom hand if HP >60%, else skip."""
+        hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+        if hp_pct > 0.60:
+            phantom = Enemy(
+                name="Phantom", hp=1, max_hp=1, hit_threshold=16,
+                tier="normal", rarity="common",
+            )
+            result = self.combat.play_fight(player, phantom, strategy, capture_strategy)
+            if result.player_won:
+                player.heal(self.config.map.crossroads_win_heal)
+            else:
+                player.take_damage(self.config.map.crossroads_loss_damage)
+
+    # ------------------------------------------------------------------
+    # Reward phase helper (shared by play_run)
+    # ------------------------------------------------------------------
+    def _process_rewards(self, player, enemy, result, reward_strategy,
+                         cards_removed, enchantments_applied, fold_rewards,
+                         rewards_chosen):
+        """Run post-fight reward picks. Returns updated counters."""
+        if not (result.player_won and reward_strategy):
+            return cards_removed, enchantments_applied, fold_rewards
+
+        reward_picks = 2 if enemy.tier == "boss" else 1
+        heal_amount = (
+            self.config.reward.heal_amount_elite
+            if enemy.tier in ("elite", "boss")
+            else self.config.reward.heal_amount
+        )
+        can_capture = bool(enemy.companion_type and enemy.tier == "normal")
+
+        for pick_i in range(reward_picks):
+            is_boss_bonus_pick = enemy.tier == "boss" and pick_i > 0
+            can_remove = bool(self.combat.deck.removable_ranks(
+                self.config.reward.min_deck_size
+            )) and (not is_boss_bonus_pick)
+            can_heal = (player.hp < player.max_hp)
+            can_enchant = bool(self.combat.deck.enchantable_cards(
+                1, self.config.enchantment.max_per_card
+            )) and (not is_boss_bonus_pick)
+            pick_can_capture = can_capture and (not is_boss_bonus_pick)
+            pick_heal_amount = heal_amount if not is_boss_bonus_pick else max(4, heal_amount // 2)
+
+            choice = reward_strategy.choose_reward(
+                player, self.combat.deck, enemy,
+                can_remove=can_remove,
+                can_heal=can_heal,
+                heal_amount=pick_heal_amount,
+                can_capture=pick_can_capture,
+                can_enchant=can_enchant,
+                can_fold_reward=True,
+            )
+
+            if pick_i == 0:
+                result.reward_chosen = choice
+
+            if choice == "remove_card":
+                ranks = self.combat.deck.removable_ranks(self.config.reward.min_deck_size)
+                if ranks:
+                    rank = reward_strategy.choose_rank_to_remove(
+                        ranks, self.combat.deck.rank_counts()
+                    )
+                    if rank and self.combat.deck.remove_rank(rank):
+                        cards_removed += 1
+            elif choice == "enchant" and can_enchant:
+                ecfg = self.config.enchantment
+                cards = self.combat.deck.enchantable_cards(
+                    ecfg.cards_offered, ecfg.max_per_card
+                )
+                if cards:
+                    card = reward_strategy.choose_card_to_enchant(
+                        cards, self.combat.deck
+                    )
+                    if card:
+                        offered = random.sample(
+                            ENCHANTMENT_TYPES,
+                            min(ecfg.types_offered, len(ENCHANTMENT_TYPES)),
+                        )
+                        etype = reward_strategy.choose_enchantment_type(
+                            offered, card
+                        )
+                        if etype and self.combat.deck.enchant_card(
+                            card, etype, ecfg.max_per_card
+                        ):
+                            enchantments_applied += 1
+            elif choice == "fold_reward":
+                player.folds += self.config.fold.fold_reward_amount
+                fold_rewards += 1
+            elif choice == "heal":
+                player.heal(pick_heal_amount)
+            elif choice == "capture" and pick_can_capture:
+                capture_bonus, _ = capture_bonus_from_fight(result)
+                capture_chance = min(
+                    0.95,
+                    capture_chance_for_rarity(
+                        self.config, enemy.rarity, enemy.capture_roll
+                    ) + capture_bonus,
+                )
+                if random.random() < capture_chance:
+                    template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
+                    if template:
+                        comp = Companion(
+                            name=template["name"],
+                            companion_type=enemy.companion_type,
+                            effect_type=template["effect_type"],
+                            base_value=template["base_value"],
+                            per_level=template["per_level"],
+                            activation=template.get("activation", "always"),
+                            source_rarity=enemy.rarity,
+                            power_multiplier=enemy.capture_power_mult,
+                        )
+                        player.add_captured_companion(comp)
+                        result.companion_captured = enemy.companion_type
+            rewards_chosen.append(choice)
+
+        return cards_removed, enchantments_applied, fold_rewards
+
+    # ------------------------------------------------------------------
+    # Main run loop (map traversal)
+    # ------------------------------------------------------------------
     def play_run(self, strategy, capture_strategy, reward_strategy=None,
-                 class_id=None) -> RunResult:
+                 map_strategy=None) -> RunResult:
         # Fresh deck each run so template modifications don't carry over
         self.combat.deck = Deck()
 
-        class_stats = build_class_stats(class_id)
-        base_hp = self.config.player.starting_hp + class_stats.max_hp_bonus
-        base_folds = self.config.fold.starting_folds + class_stats.max_folds_bonus
         player = Player(
-            hp=base_hp,
-            max_hp=base_hp,
+            hp=self.config.player.starting_hp,
+            max_hp=self.config.player.starting_hp,
             max_companion_slots=self.config.player.max_companion_slots,
-            folds=base_folds,
-            class_id=class_id,
-            class_stats=class_stats,
-            class_talents={},
+            folds=self.config.fold.starting_folds,
         )
 
-        encounters = self._generate_encounters()
+        act_maps = [generate_act_map(a, self.config)
+                     for a in range(self.config.run.acts)]
+
         fights = []
-        current_act = -1
         cards_removed = 0
         enchantments_applied = 0
         fold_rewards = 0
-        class_upgrades = 0
         rewards_chosen = []
+        total_encounters = sum(
+            1 for am in act_maps for n in am.nodes
+            if n.node_type in COMBAT_NODE_TYPES
+        )
+        dead = False
 
-        for enemy_key, act in encounters:
-            if act > current_act and current_act >= 0:
+        for act_idx, act_map in enumerate(act_maps):
+            # Heal between acts
+            if act_idx > 0:
                 heal = int(player.max_hp * self.config.run.heal_between_acts_pct)
                 player.heal(heal)
-            current_act = act
 
-            enemy = self._create_enemy(enemy_key, act)
-            result = self.combat.play_fight(player, enemy, strategy, capture_strategy)
+            current = act_map.start_node()
+            while current:
+                current.visited = True
 
-            # --- Reward phase (after won fights) ---
-            if result.player_won and reward_strategy:
-                reward_picks = 2 if enemy.tier == "boss" else 1
-                # Invariants: these don't change between reward picks
-                heal_amount = (
-                    self.config.reward.heal_amount_elite
-                    if enemy.tier in ("elite", "boss")
-                    else self.config.reward.heal_amount
-                )
-                can_capture = bool(enemy.companion_type and enemy.tier == "normal")
-                has_class = player.class_id is not None
-
-                for pick_i in range(reward_picks):
-                    is_boss_bonus_pick = enemy.tier == "boss" and pick_i > 0
-                    # Re-evaluate availability each pick; prior choices may
-                    # have changed deck size, player HP, talent state, etc.
-                    can_remove = bool(self.combat.deck.removable_ranks(
-                        self.config.reward.min_deck_size
-                    )) and (not is_boss_bonus_pick)
-                    can_heal = (player.hp < player.max_hp)
-                    can_enchant = bool(self.combat.deck.enchantable_cards(
-                        1, self.config.enchantment.max_per_card
-                    )) and (not is_boss_bonus_pick)
-                    non_maxed = get_non_maxed_talents(player)
-                    can_class_upgrade = bool(non_maxed) and has_class and (not is_boss_bonus_pick)
-                    pick_can_capture = can_capture and (not is_boss_bonus_pick)
-                    pick_heal_amount = heal_amount if not is_boss_bonus_pick else max(4, heal_amount // 2)
-
-                    choice = reward_strategy.choose_reward(
-                        player, self.combat.deck, enemy,
-                        can_remove=can_remove,
-                        can_heal=can_heal,
-                        heal_amount=pick_heal_amount,
-                        can_capture=pick_can_capture,
-                        can_enchant=can_enchant,
-                        can_fold_reward=True,
-                        can_class_upgrade=can_class_upgrade,
+                if current.node_type in COMBAT_NODE_TYPES:
+                    enemy = self._create_enemy(current.enemy_key, act_idx)
+                    result = self.combat.play_fight(
+                        player, enemy, strategy, capture_strategy
                     )
 
-                    if pick_i == 0:
-                        result.reward_chosen = choice
-
-                    if choice == "remove_card":
-                        ranks = self.combat.deck.removable_ranks(self.config.reward.min_deck_size)
-                        if ranks:
-                            rank = reward_strategy.choose_rank_to_remove(
-                                ranks, self.combat.deck.rank_counts()
-                            )
-                            if rank and self.combat.deck.remove_rank(rank):
-                                cards_removed += 1
-                    elif choice == "enchant" and can_enchant:
-                        ecfg = self.config.enchantment
-                        cards = self.combat.deck.enchantable_cards(
-                            ecfg.cards_offered, ecfg.max_per_card
+                    cards_removed, enchantments_applied, fold_rewards = \
+                        self._process_rewards(
+                            player, enemy, result, reward_strategy,
+                            cards_removed, enchantments_applied,
+                            fold_rewards, rewards_chosen,
                         )
-                        if cards:
-                            card = reward_strategy.choose_card_to_enchant(
-                                cards, self.combat.deck
-                            )
-                            if card:
-                                offered = random.sample(
-                                    ENCHANTMENT_TYPES,
-                                    min(ecfg.types_offered, len(ENCHANTMENT_TYPES)),
-                                )
-                                etype = reward_strategy.choose_enchantment_type(
-                                    offered, card
-                                )
-                                if etype and self.combat.deck.enchant_card(
-                                    card, etype, ecfg.max_per_card
-                                ):
-                                    enchantments_applied += 1
-                    elif choice == "fold_reward":
-                        player.folds += self.config.fold.fold_reward_amount
-                        fold_rewards += 1
-                    elif choice == "heal":
-                        player.heal(pick_heal_amount)
-                    elif choice == "capture" and pick_can_capture:
-                        capture_bonus, _ = capture_bonus_from_fight(result)
-                        capture_chance = min(
-                            0.95,
-                            capture_chance_for_rarity(
-                                self.config, enemy.rarity, enemy.capture_roll
-                            ) + capture_bonus,
+
+                    fights.append(result)
+
+                    if not player.alive:
+                        dead = True
+                        break
+
+                elif current.node_type == NodeType.BARROW:
+                    removed = self._sim_barrow(player, reward_strategy)
+                    cards_removed += removed
+
+                elif current.node_type == NodeType.VIGIL:
+                    self._sim_vigil(player)
+
+                elif current.node_type == NodeType.CROSSROADS:
+                    self._sim_crossroads(player, strategy, capture_strategy)
+                    if not player.alive:
+                        dead = True
+                        break
+
+                # Advance to next node
+                children = act_map.get_children(current.node_id)
+                if not children:
+                    break
+                elif len(children) == 1:
+                    current = children[0]
+                else:
+                    if map_strategy:
+                        current = map_strategy.choose_fork(
+                            children, player, self.combat.deck
                         )
-                        # Roll for capture success
-                        if random.random() < capture_chance:
-                            template = _cfg.COMPANION_TEMPLATES.get(enemy.companion_type)
-                            if template:
-                                comp = Companion(
-                                    name=template["name"],
-                                    companion_type=enemy.companion_type,
-                                    effect_type=template["effect_type"],
-                                    base_value=template["base_value"],
-                                    per_level=template["per_level"],
-                                    activation=template.get("activation", "always"),
-                                    source_rarity=enemy.rarity,
-                                    power_multiplier=enemy.capture_power_mult,
-                                )
-                                player.add_captured_companion(comp)
-                                result.companion_captured = enemy.companion_type
-                    elif choice == "class_upgrade" and can_class_upgrade:
-                        talent_key = reward_strategy.choose_class_talent(player)
-                        if talent_key and apply_talent_upgrade(player, talent_key):
-                            class_upgrades += 1
+                    else:
+                        current = children[0]
 
-                    rewards_chosen.append(choice)
-
-            fights.append(result)
-
-            if not player.alive:
+            if dead:
                 break
 
         return RunResult(
             fights=fights,
             survived=player.alive,
             encounters_completed=len(fights),
-            total_encounters=len(encounters),
+            total_encounters=total_encounters,
             final_hp=player.hp,
             companions_captured=[f.companion_captured for f in fights if f.companion_captured],
             companion_levels={
@@ -1462,6 +1652,5 @@ class RunEngine:
             enchantments_applied=enchantments_applied,
             fold_rewards=fold_rewards,
             rewards_chosen=rewards_chosen,
-            class_upgrades=class_upgrades,
-            class_id=class_id,
+            final_wager_used=player.final_wager_used,
         )

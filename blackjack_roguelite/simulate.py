@@ -4,8 +4,8 @@ Simulation harness: player strategies, capture strategies, reward strategies, ba
 import random
 from typing import List, Dict
 
-from .config import GameConfig, CLASS_TEMPLATES, COMPANION_TEMPLATES
-from .engine import hand_value, RunEngine, RunResult, Companion, get_non_maxed_talents
+from .config import GameConfig, COMPANION_TEMPLATES
+from .engine import hand_value, RunEngine, RunResult, Companion, NodeType
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +228,9 @@ class RewardStrategy:
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False, can_class_upgrade=False):
-        """Return 'remove_card', 'heal', 'capture', 'enchant', 'fold_reward', or 'class_upgrade'."""
+                      can_fold_reward=False):
+        """Return 'remove_card', 'heal', 'capture', 'enchant', or 'fold_reward'."""
         raise NotImplementedError
-
-    def choose_class_talent(self, player):
-        """Pick which talent to upgrade. Override in class-aware strategies."""
-        non_maxed = get_non_maxed_talents(player)
-        return random.choice(non_maxed) if non_maxed else None
 
     def should_swap_for_capture(self, player, incoming_companion_type):
         """Whether to replace an existing companion when slots are full."""
@@ -273,7 +268,7 @@ class RewardStrategy:
 
     def choose_enchantment_type(self, types, card):
         """Pick which enchantment type to apply."""
-        pref = ["fury", "siphon", "ward"]
+        pref = ["fury", "gambit", "hex", "echo", "siphon", "ward"]
         for p in pref:
             if p in types:
                 return p
@@ -288,7 +283,7 @@ class SmartRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False, can_class_upgrade=False):
+                      can_fold_reward=False):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
 
         # Capture remains high-value early, now based on roster depth.
@@ -308,7 +303,6 @@ class SmartRewardStrategy(RewardStrategy):
         cards_removed = 52 - deck.template_size
         total_enchants = deck.total_enchantments()
         if can_enchant and can_remove and cards_removed >= 5:
-            # Keep enchantments meaningful, but do not starve deck trimming.
             if total_enchants < max(1, int(cards_removed * 0.45)):
                 return "enchant"
 
@@ -338,14 +332,19 @@ class SmartRewardStrategy(RewardStrategy):
         return None
 
     def choose_enchantment_type(self, types, card):
-        """Fury on high cards, ward on low cards, siphon in between."""
+        """Pick enchantment based on card value.
+        High cards: fury/gambit (offensive, benefit from wins).
+        Low cards: hex/ward (defensive/attrition, these cards see more hands).
+        Mid cards: gambit/hex (gambit rewards risky stands, hex builds bleed).
+        Echo is mid-priority everywhere (best as 2nd/3rd enchant on a card,
+        but the strategy can't see existing enchantments so we rank it middle)."""
         val = self.RANK_VAL.get(card.rank, 0)
         if val >= 10:
-            pref = ["fury", "siphon", "ward"]
+            pref = ["fury", "gambit", "echo", "hex", "siphon", "ward"]
         elif val <= 6:
-            pref = ["ward", "siphon", "fury"]
+            pref = ["hex", "ward", "echo", "siphon", "fury", "gambit"]
         else:
-            pref = ["siphon", "fury", "ward"]
+            pref = ["gambit", "hex", "echo", "siphon", "fury", "ward"]
         for p in pref:
             if p in types:
                 return p
@@ -359,7 +358,7 @@ class HealFirstRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False, can_class_upgrade=False):
+                      can_fold_reward=False):
         if can_capture and (
             player.can_capture() or self.should_swap_for_capture(player, enemy.companion_type)
         ):
@@ -389,7 +388,7 @@ class RemoveFirstRewardStrategy(RewardStrategy):
     def choose_reward(self, player, deck, enemy,
                       can_remove=True, can_heal=True,
                       heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False, can_class_upgrade=False):
+                      can_fold_reward=False):
         if can_capture and (
             player.can_capture() or self.should_swap_for_capture(player, enemy.companion_type)
         ):
@@ -413,87 +412,39 @@ class RemoveFirstRewardStrategy(RewardStrategy):
 
 
 # ---------------------------------------------------------------------------
-# Class-aware reward strategy
+# Map traversal strategies (which fork to pick at branch nodes)
 # ---------------------------------------------------------------------------
-# Soft goals per class: stat -> target value
-_CLASS_SOFT_GOALS = {
-    "thief": {"crit_chance": 0.22, "crit_mult_bonus": 0.45},
-    "warrior": {"damage_reduction_pct": 0.20, "max_hp_bonus": 30},
-    "mage": {"effect_power_pct": 0.35, "bust_penalty_reduction": 0.15},
-}
+class MapTraversalStrategy:
+    name = "base"
+
+    def choose_fork(self, children, player, deck):
+        """Pick a MapNode from children list at a branch point."""
+        raise NotImplementedError
 
 
-class ClassAwareRewardStrategy(SmartRewardStrategy):
-    """Three-category reward logic: sustain -> class_upgrade -> deck."""
-    name = "class_aware"
+class SmartMapStrategy(MapTraversalStrategy):
+    """Vigil when HP <40%, Barrow when deck >30 cards, else Crossroads."""
+    name = "smart_map"
 
-    def choose_reward(self, player, deck, enemy,
-                      can_remove=True, can_heal=True,
-                      heal_amount=0, can_capture=False, can_enchant=False,
-                      can_fold_reward=False, can_class_upgrade=False):
+    def choose_fork(self, children, player, deck):
         hp_pct = player.hp / player.max_hp if player.max_hp > 0 else 0
+        type_map = {c.node_type: c for c in children}
 
-        # Capture still high-value early
-        roster_size = player.total_companions() if hasattr(player, "total_companions") else len(player.companions)
-        if can_capture and roster_size < 3 and hp_pct > 0.55:
-            return "capture"
+        if hp_pct < 0.40 and NodeType.VIGIL in type_map:
+            return type_map[NodeType.VIGIL]
+        if deck.template_size > 30 and NodeType.BARROW in type_map:
+            return type_map[NodeType.BARROW]
+        if NodeType.CROSSROADS in type_map:
+            return type_map[NodeType.CROSSROADS]
+        return children[0]
 
-        # Sustain: HP critically low
-        if can_heal and hp_pct < 0.35:
-            return "heal"
 
-        # Replenish folds when empty
-        if can_fold_reward and player.folds <= 0:
-            return "fold_reward"
+class RandomMapStrategy(MapTraversalStrategy):
+    """Random fork choice."""
+    name = "random_map"
 
-        # Class upgrade: if any key stat is below soft goal
-        if can_class_upgrade and player.class_id:
-            goals = _CLASS_SOFT_GOALS.get(player.class_id, {})
-            for stat, target in goals.items():
-                current = getattr(player.class_stats, stat, 0)
-                if current < target:
-                    return "class_upgrade"
-
-        # Fall through to deck improvement (SmartRewardStrategy logic)
-        cards_removed = 52 - deck.template_size
-        total_enchants = deck.total_enchantments()
-        if can_enchant and can_remove and cards_removed >= 5:
-            if total_enchants < max(1, int(cards_removed * 0.45)):
-                return "enchant"
-        if can_remove:
-            return "remove_card"
-        if can_enchant:
-            return "enchant"
-        if can_heal:
-            return "heal"
-        return "remove_card"
-
-    def choose_class_talent(self, player):
-        """Pick talent whose stat has the largest gap below its soft goal."""
-        if not player.class_id:
-            return None
-        goals = _CLASS_SOFT_GOALS.get(player.class_id, {})
-        non_maxed = get_non_maxed_talents(player)
-        if not non_maxed:
-            return None
-
-        template = CLASS_TEMPLATES[player.class_id]
-        best_key = None
-        best_gap = -999
-
-        for key in non_maxed:
-            td = template["talents"][key]
-            stat = td["stat"]
-            target = goals.get(stat)
-            if target is not None:
-                current = getattr(player.class_stats, stat, 0)
-                gap = target - current
-                if gap > best_gap:
-                    best_gap = gap
-                    best_key = key
-
-        # If no goal-driven talent found, pick first non-maxed
-        return best_key if best_key else non_maxed[0]
+    def choose_fork(self, children, player, deck):
+        return random.choice(children)
 
 
 # ---------------------------------------------------------------------------
@@ -509,16 +460,17 @@ class Simulator:
         strategy: Strategy = None,
         capture_strategy: CaptureStrategy = None,
         reward_strategy: RewardStrategy = None,
-        class_id: str = None,
+        map_strategy: MapTraversalStrategy = None,
     ) -> List[RunResult]:
         strategy = strategy or BasicStrategy()
         capture_strategy = capture_strategy or AlwaysCaptureStrategy()
         reward_strategy = reward_strategy or SmartRewardStrategy()
+        map_strategy = map_strategy or SmartMapStrategy()
 
         engine = RunEngine(self.config)
         return [
             engine.play_run(strategy, capture_strategy, reward_strategy,
-                            class_id=class_id)
+                            map_strategy)
             for _ in range(num_runs)
         ]
 
@@ -526,12 +478,12 @@ class Simulator:
         self,
         num_runs: int = 1000,
         reward_strategy: RewardStrategy = None,
-        class_id: str = None,
+        map_strategy: MapTraversalStrategy = None,
     ) -> Dict[str, List[RunResult]]:
         """Run every strategy and return {name: results}."""
         return {
             s.name: self.run(num_runs, s,
                              reward_strategy=reward_strategy,
-                             class_id=class_id)
+                             map_strategy=map_strategy)
             for s in ALL_STRATEGIES
         }
